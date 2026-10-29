@@ -18,6 +18,10 @@ on:
         description: Diagnose Taiwan searches using Secrets; log only counts and loading stages
         type: boolean
         default: false
+      state_audit:
+        description: Read encrypted history for private reference items without searching, notifying or saving
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -34,7 +38,42 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m unittest -q
-        if: ${{ !inputs.surugaya_probe && !inputs.taiwan_probe && !inputs.taiwan_probe_private }}
+        if: ${{ !inputs.surugaya_probe && !inputs.taiwan_probe && !inputs.taiwan_probe_private && !inputs.state_audit }}
+      - name: Restore encrypted history for read-only audit
+        if: ${{ inputs.state_audit }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .state/seen.enc
+          key: Linux-mercari-private-state-v1-audit-${{ github.run_id }}
+          restore-keys: Linux-mercari-private-state-v1-
+      - name: Audit private reference history
+        if: ${{ inputs.state_audit }}
+        env:
+          MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
+          MONITOR_AUDIT_JSON: ${{ secrets.MONITOR_AUDIT_JSON }}
+        shell: python
+        run: |
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          import mercari_watch as app
+          try:
+              app.SEEN = Path('.state/seen.enc')
+              if not app.SEEN.is_file():
+                  raise ValueError('History missing')
+              references = json.loads(os.environ['MONITOR_AUDIT_JSON'])
+              if not isinstance(references, list) or not references:
+                  raise ValueError('References missing')
+              state = app.load_state()
+              for index, reference in enumerate(references):
+                  identities = reference['identities']
+                  if not isinstance(identities, list) or not identities or not all(isinstance(i, str) for i in identities):
+                      raise ValueError('Invalid reference')
+                  known = state.get('_known_by_route', {}).get(reference['route'], [])
+                  history = state.get(reference['watch_id'], [])
+                  print(json.dumps({'reference': index + 1, 'seen_or_baselined': any(i in known for i in identities), 'profile_history_known': any(i in history for i in identities), 'has_source_baseline': any(token.startswith(reference['route'] + ':' + reference['watch_id'] + ':') for token in state.get('_baselines', []))}), flush=True)
+          except Exception as error:
+              raise SystemExit(f'Private history audit failed ({type(error).__name__}); details omitted') from None
       - name: Install Taiwan probe browser
         if: ${{ inputs.taiwan_probe || inputs.taiwan_probe_private }}
         run: python -m playwright install --with-deps chromium
