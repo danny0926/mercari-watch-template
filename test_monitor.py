@@ -408,6 +408,13 @@ class MonitorTests(unittest.TestCase):
             with self.assertRaises(SourceUnavailable):
                 parse_taiwan_results(invalid)
 
+    def test_taiwan_genuine_empty_results_still_require_verified_filters(self):
+        empty = {"status": "in-stock", "sort": "新商品", "items": [], "empty": True, "hasRoot": False}
+        self.assertEqual(parse_taiwan_results(empty), [])
+        for invalid in ({**empty, "empty": False}, {**empty, "status": "all"}, {**empty, "sort": "推薦排序"}):
+            with self.subTest(invalid=invalid), self.assertRaises(SourceUnavailable):
+                parse_taiwan_results(invalid)
+
     def test_cross_source_duplicates_merge_links_and_stay_known(self):
         self.write_watches([watch(price_max=None, sources=["jp", "tw"])])
         self.seen_path.write_text(json.dumps({"sample": ["old"], "_known": ["old"], "_baselines": ["sample:jp", "sample:tw"]}))

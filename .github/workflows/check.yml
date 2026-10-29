@@ -46,13 +46,11 @@ jobs:
         shell: python
         run: |
           import asyncio
-          import json
           import os
           import sys
           from pathlib import Path
           sys.path.insert(0, str(Path.cwd()))
-          from playwright.async_api import async_playwright
-          from market_sources import EXTRACT_SEARCH, parse_taiwan_results, taiwan_search_url
+          from market_sources import TaiwanSearch
           from mercari_watch import load_watchlist
           async def probe():
               keywords = ['Nintendo Switch', 'zzzz-no-such-native-offer-927419']
@@ -60,32 +58,19 @@ jobs:
                   keywords = list(dict.fromkeys(keyword for rule in load_watchlist() if 'tw' in rule.get('sources', ['jp']) for keyword in (rule.get('source_keywords', {}).get('tw', rule.get('keywords', [])) or [rule['keyword']])))
               if not keywords:
                   raise SystemExit('No Taiwan queries configured')
-              async with async_playwright() as engine:
-                  browser = await engine.chromium.launch(headless=True, channel='chromium')
-                  try:
-                      agent = f'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{browser.version} Safari/537.36'
-                      for index, keyword in enumerate(keywords):
-                          page = await browser.new_page(locale='zh-TW', user_agent=agent)
-                          stage = 'navigation'
-                          try:
-                              response = await page.goto(taiwan_search_url(keyword), wait_until='domcontentloaded', timeout=30000)
-                              print('Query:', index + 1, 'Navigation HTTP:', response.status if response else None, flush=True)
-                              stage = 'controls'
-                              await page.wait_for_selector('[data-testid="item-sort-panel"]', timeout=20000)
-                              stage = 'results'
-                              await page.wait_for_function("""() => !!document.querySelector('[data-testid="search-result-items"] a[data-testid^="serp-item-tile"]') || /找不到符合|沒有找到|沒有符合|找不到商品|沒有搜尋結果|沒有搜索結果/.test(document.querySelector('main')?.innerText || '')""", timeout=20000)
-                              items = parse_taiwan_results(await page.evaluate(EXTRACT_SEARCH))
-                              print('Verified Taiwan offers:', len(items), flush=True)
-                          except Exception as error:
-                              print('Failure stage:', stage, type(error).__name__, flush=True)
-                              snapshot = await page.evaluate("""() => ({onTaiwanHost:location.host==='tw.mercari.com',readyState:document.readyState,hasSort:!!document.querySelector('[data-testid="item-sort-panel"]'),hasAvailability:!!document.querySelector('[data-testid="item-availability-filter-panel"]'),hasResults:!!document.querySelector('[data-testid="search-result-items"]'),cards:document.querySelectorAll('a[data-testid^="serp-item-tile"]').length,empty:/找不到符合|沒有找到|沒有符合|找不到商品|沒有搜尋結果|沒有搜索結果/.test(document.querySelector('main')?.innerText||''),challenge:/captcha|verify you are human|access denied|checking your browser/i.test(document.body.innerText)})""")
-                              print(json.dumps(snapshot), flush=True)
-                              raise SystemExit('Taiwan diagnostic failed; private query omitted') from None
-                          finally:
-                              await page.close()
-                  finally:
-                      await browser.close()
-          asyncio.run(probe())
+              async with TaiwanSearch() as source:
+                  for index, keyword in enumerate(keywords):
+                      try:
+                          items = await source.search(keyword)
+                      except Exception as error:
+                          raise SystemExit(f'Taiwan query {index + 1} failed at {source.stage} ({type(error).__name__}); private query omitted') from None
+                      if os.environ['PRIVATE_PROBE'] != 'true' and bool(items) != (index == 0):
+                          raise SystemExit('Unexpected populated/empty public sample result')
+                      print('Verified Taiwan query:', index + 1, 'offers:', len(items), flush=True)
+          try:
+              asyncio.run(probe())
+          except Exception as error:
+              raise SystemExit(f'Taiwan probe failed ({type(error).__name__}); private details omitted') from None
       - name: Verify Japanese storefront access
         if: ${{ inputs.surugaya_probe }}
         shell: python

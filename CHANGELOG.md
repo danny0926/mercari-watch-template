@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6
+
+- Recognize the Taiwan storefront's native empty-results component instead of relying on incomplete text patterns.
+- Stop treating valid zero-result searches as browser timeouts; continue rejecting unverified filters, blank pages and failed loads.
+- Add cloud diagnostics for populated, empty and privately configured Taiwan queries without exposing query text or sending notifications.
+- Report timeout loading stages while preserving encrypted history and source failure handling.
+
 ## 0.4.5
 
 - Use Mercari's explicit Japanese item and Shops routes in notification links to bypass the verified region-cookie redirect.

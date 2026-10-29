@@ -2,6 +2,7 @@
 import re
 import os
 import asyncio
+import sys
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
 
@@ -53,9 +54,14 @@ EXTRACT_SEARCH = r"""() => {
             image: a.querySelector('img')?.src || '',
         };
     });
-    const empty = /找不到符合|沒有找到|沒有符合|找不到商品|沒有搜尋結果|沒有搜索結果/.test(document.querySelector('main')?.innerText || '');
+    const empty = !!document.querySelector('[data-testid="no-items-found-empty-screen"]');
     return {status, sort, items, empty, hasRoot: !!root};
 }"""
+
+TAIWAN_SEARCH_READY = r"""() =>
+    !!document.querySelector('[data-testid="search-result-items"] a[data-testid^="serp-item-tile"]') ||
+    !!document.querySelector('[data-testid="no-items-found-empty-screen"]')
+"""
 
 
 def parse_taiwan_results(data: dict) -> list[TaiwanItem]:
@@ -85,6 +91,7 @@ class TaiwanSearch:
     def __init__(self):
         self.playwright = None
         self.browser = None
+        self.stage = "browser"
 
     async def __aenter__(self):
         return self
@@ -102,6 +109,7 @@ class TaiwanSearch:
                 return await self._search_once(keyword)
             except BrowserTimeout as error:
                 if attempt:
+                    print(f"tw 載入逾時階段：{self.stage}", file=sys.stderr, flush=True)
                     raise SourceUnavailable("Taiwan search timed out after one retry") from error
                 await asyncio.sleep(1)
 
@@ -115,15 +123,16 @@ class TaiwanSearch:
                  f"Chrome/{self.browser.version} Safari/537.36")
         page = await self.browser.new_page(locale="zh-TW", user_agent=agent)
         try:
+            self.stage = "navigation"
             response = await page.goto(taiwan_search_url(keyword), wait_until="domcontentloaded", timeout=30000)
             if response is None or response.status >= 400:
                 status = response.status if response is not None else "no response"
                 raise SourceUnavailable(f"Taiwan search request was rejected (HTTP {status})")
+            self.stage = "controls"
             await page.wait_for_selector('[data-testid="item-sort-panel"]', timeout=20000)
-            await page.wait_for_function("""() =>
-                !!document.querySelector('[data-testid="search-result-items"] a[data-testid^="serp-item-tile"]') ||
-                /找不到符合|沒有找到|沒有符合|找不到商品|沒有搜尋結果|沒有搜索結果/.test(document.querySelector('main')?.innerText || '')
-            """, timeout=20000)
+            self.stage = "results"
+            await page.wait_for_function(TAIWAN_SEARCH_READY, timeout=20000)
+            self.stage = "validation"
             return parse_taiwan_results(await page.evaluate(EXTRACT_SEARCH))
         finally:
             await page.close()
