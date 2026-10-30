@@ -68,6 +68,8 @@ WATCHLIST_JSON='[{"id":"watch-1","name":"商品A","keyword":"範例商品","keyw
 
 若標題只寫品牌、比例或套組名稱，可新增獨立規則擴大搜尋入口，並使用 `must_match_anywhere`／`must_not_match_anywhere` 正規表示式比對同筆刊登的標題與商品說明；原有 `must_match`／`must_not_match` 仍只檢查標題。說明讀取目前支援有可核對日本編號的 Mercari 一般商品與 Shops，同一輪共用讀取快取。這是文字規則比對，不能自動判斷只有圖片能辨識的角色；說明缺少或不符合條件時，預設不通知，只有 `review_unconfirmed=true` 才以「【候補】角色尚未確認」通知。明確符合排除規則的項目仍會略過。
 
+只接受已確認文字條件的通知時，維持 `review_unconfirmed=false`。候補提醒須明確啟用，不應將套組名稱本身當作角色符合的依據。
+
 擴大條件時可使用新的規則 `id`，讓其他舊刊登先建立基準。若需補查特定刊登，將其編號放在該規則的 `catchup_ids`（最多 50 個，實際資料只放 `.env`／Secrets）；命中搜尋與篩選後以「【補查】」通知。補查與成功通知憑證會寫入加密歷史；送出失敗會保留重試資格，已完成補查的編號不重播。近期成功通知保留時間、原因與判斷依據，既有舊歷史仍無法反推是否曾通知。
 
 不同規則可以指定不同 Discord 通道。例如第二組在私人 JSON 中加上 `"discord_webhook_env":"DISCORD_WEBHOOK_URL_SECONDARY"`，並在 `.env`／GitHub Secret 填入同名 Webhook。只接受 `DISCORD_WEBHOOK_URL` 或 `DISCORD_WEBHOOK_URL_` 後接大寫英數與底線的名稱；增加其他名稱時，也須同步加入 workflow 的環境變數。
@@ -98,6 +100,8 @@ python -m unittest -q
 商品圖片由商品來源提供；缺少圖片時仍保留名稱與連結。兩站皆找到相同商品時合併連結。台灣站以新台幣顯示，日本站以日圓顯示，不自行推算匯率。圖片與商品內容需自行核對。
 
 `MERCARI_LINK_MODE=original` 保留商品原站作為 Discord 標題及 LINE 查看按鈕的主連結。經商品編號核對的 Mercari 日本站通知使用明確的日文路徑 `/ja/item/…`、`/ja/shops/product/…`，台灣站連結保留。Discord 另外標示商品來源，店家刊登標為「Mercari Shops 日本站」；可核對商品編號時，另附「Buyee 代購入口（非原站）」。Buyee 是代購服務，並非商品來源，也不代表監聽新增了 Buyee 網站。
+
+日文商品連結沿用 Mercari 原站登入流程。若原站宣傳彈窗覆蓋頁面，先關閉，再回到頁面頂端點「ログイン」；登入由 Mercari 網站處理。
 
 已重現的轉區原因是瀏覽器的 `gopWebRedirection=tw` cookie：沒有語系前綴的日本商品網址會回傳 HTTP 307，導至台灣的轉址入口，再到台灣商品頁。明確的 `/ja/` 商品路徑可避開本次確認的轉址規則；通知只調整開啟路徑，原商品編號、搜尋來源與去重紀錄不變，不讀寫使用者瀏覽器的 cookie。網站未來改版或 App 接管開啟時仍需另行確認。
 
