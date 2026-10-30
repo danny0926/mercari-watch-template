@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Add a graceful stop command for a local monitor running in the background, preserving the active round and encrypted handback.
+- Record the last completed local cycle and source error count in local status.
+
 ## 0.6.0
 
 - Add a local monitor launcher that pauses the cloud clock, drains active cloud searches and resumes the original cloud setting on graceful exit.

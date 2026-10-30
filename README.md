@@ -166,6 +166,8 @@ Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
 
 **停止時按一次 Ctrl+C，等候「交接完成」後再關閉視窗。** 程式會完成當輪，將兩份紀錄壓縮後再以既有金鑰加密，經專用 Secrets 傳給 import workflow。兩個分組都成功存入原本的 Cache 後，才解除本機監聽權並恢復雲端計時。暫存 Secrets 隨後刪除；公開輸入僅包含隨機交接代號，不包含商品編號、搜尋條件或憑證。此流程有傳輸大小上限，超限時保留紀錄並停止交接。
 
+若本機監聽在背景執行，可雙擊 `stop-local.cmd` 或執行 `python local_monitor.py --stop`，要求完成當輪後交還雲端。`--status` 會顯示最近一輪完成時間與來源錯誤數，方便確認本機是否已實際執行搜尋。
+
 ```powershell
 # 查看狀態，不切換監聽
 .\.venv\Scripts\python.exe local_monitor.py --status

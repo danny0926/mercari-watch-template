@@ -137,6 +137,11 @@ class LocalMonitorTests(unittest.TestCase):
                 with local.LocalLock(lock):
                     self.fail("duplicate process lock acquired")
 
+    def test_background_stop_request_interrupts_idle_wait(self):
+        (self.monitor.root / "stop.request").touch()
+        self.assertTrue(self.monitor.wait_for_next_cycle())
+        self.assertTrue(self.monitor.stop.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

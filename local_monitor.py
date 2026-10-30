@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -275,6 +276,20 @@ class LocalMonitor:
                 os.environ["MONITOR_STATE_PATH"] = previous_path
         return errors
 
+    def stop_requested(self):
+        if (self.root / "stop.request").exists():
+            self.stop.set()
+        return self.stop.is_set()
+
+    def wait_for_next_cycle(self):
+        deadline = time.monotonic() + self.interval
+        while not self.stop_requested():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            self.stop.wait(min(1, remaining))
+        return True
+
     def start(self, once=False, handoff_only=False):
         self.preflight()
         previous = self.previous()
@@ -298,9 +313,12 @@ class LocalMonitor:
             self.download(self.transfer("export"))
             if not handoff_only:
                 print("本機已接手。按 Ctrl+C 會完成當輪後交還雲端，請勿直接關閉視窗。", flush=True)
-                while not self.stop.is_set():
+                while not self.stop_requested():
                     errors = self.cycle()
-                    if once or self.stop.wait(self.interval):
+                    self.save(last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
+                              last_cycle_errors=errors, pid=os.getpid())
+                    print(f"本機本輪完成：{errors} 個來源錯誤。", flush=True)
+                    if once or self.wait_for_next_cycle():
                         break
         finally:
             self.restore()
@@ -327,6 +345,7 @@ def main():
     modes.add_argument("--handoff-only", action="store_true", help="驗證實際交接，不搜尋或發商品通知")
     modes.add_argument("--resume-cloud", action="store_true", help="將前次本機紀錄交回並恢復雲端")
     modes.add_argument("--status", action="store_true", help="唯讀查看雲端開關與本機交接階段")
+    modes.add_argument("--stop", action="store_true", help="要求正在執行的本機監聽完成當輪後交還雲端")
     args = parser.parse_args()
     try:
         github = GitHub(os.environ.get("MONITOR_GITHUB_REPOSITORY", "").strip())
@@ -337,9 +356,20 @@ def main():
             claim = monitor.previous()
             print(json.dumps({"cloud_enabled": flags.get("MONITOR_ENABLED"),
                               "local_active": flags.get("LOCAL_MONITOR_ACTIVE", "false"),
-                              "phase": claim.get("phase") if claim else "none"}))
+                              "phase": claim.get("phase") if claim else "none",
+                              "last_cycle_completed_at": claim.get("last_cycle_completed_at") if claim else None,
+                              "last_cycle_errors": claim.get("last_cycle_errors") if claim else None}))
+            return 0
+        if args.stop:
+            claim = monitor.previous()
+            if not claim or claim["phase"] == FINISHED:
+                print("本機沒有尚待交還的監聽工作。")
+                return 0
+            (ROOT / "stop.request").touch()
+            print("已送出停止要求；本機會完成當輪並交還雲端，請稍後查看 --status。")
             return 0
         with LocalLock(ROOT / "launcher.lock"):
+            (ROOT / "stop.request").unlink(missing_ok=True)
             def stop(*_):
                 if not monitor.stop.is_set():
                     print("收到停止要求，完成當輪及交接後離開……", flush=True)
