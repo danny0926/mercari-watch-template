@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- Add a local monitor launcher that pauses the cloud clock, drains active cloud searches and resumes the original cloud setting on graceful exit.
+- Exchange both source histories through authenticated, encrypted, session-bound Artifacts and Secrets while retaining existing cache formats and deduplication identities.
+- Add a local process lock, persistent recovery journal, explicit cloud recovery and a handoff-only mode without searches or product notifications.
+- Block cloud product jobs while local ownership is active; keep CI independent and document manual recovery after abrupt termination.
+
 ## 0.5.1
 
 - Read verified direct-store time-sale prices separately from crossed-out regular prices, retail prices, shipping thresholds and marketplace offers.

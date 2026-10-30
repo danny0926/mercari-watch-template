@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    if: vars.MONITOR_ENABLED == 'true'
+    if: vars.MONITOR_ENABLED == 'true' && vars.LOCAL_MONITOR_ACTIVE != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -44,7 +44,7 @@ jobs:
           PY
   monitor:
     needs: validate
-    if: vars.MONITOR_ENABLED == 'true' && !inputs.bootstrap
+    if: vars.MONITOR_ENABLED == 'true' && vars.LOCAL_MONITOR_ACTIVE != 'true' && !inputs.bootstrap
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -65,7 +65,7 @@ jobs:
           exit 1
   next:
     needs: validate
-    if: vars.MONITOR_ENABLED == 'true'
+    if: vars.MONITOR_ENABLED == 'true' && vars.LOCAL_MONITOR_ACTIVE != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:

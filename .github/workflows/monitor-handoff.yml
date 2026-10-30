@@ -1,0 +1,100 @@
+name: Monitor state handoff
+run-name: State handoff ${{ inputs.mode }} ${{ inputs.session }}
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [export, import]
+        required: true
+      session:
+        description: Opaque local handoff session; never enter search terms
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: mercari-monitor
+  cancel-in-progress: false
+jobs:
+  state:
+    name: state-${{ matrix.slot }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slot: core
+            runner: ubuntu-latest
+            path: .state/seen.enc
+            prefix: Linux-mercari-private-state-v1-
+          - slot: surugaya
+            runner: windows-latest
+            path: .state/surugaya-seen.enc
+            prefix: Windows-surugaya-private-state-v1-
+    env:
+      PYTHONIOENCODING: utf-8
+      HANDOFF_ID: ${{ inputs.session }}
+      STATE_SLOT: ${{ matrix.slot }}
+      STATE_PATH: ${{ matrix.path }}
+    steps:
+      - name: Require paused cloud monitoring
+        env:
+          LOCAL_ACTIVE: ${{ vars.LOCAL_MONITOR_ACTIVE }}
+          CLOUD_ENABLED: ${{ vars.MONITOR_ENABLED }}
+        shell: python
+        run: |
+          import os, uuid
+          if os.environ['LOCAL_ACTIVE'] != 'true' or os.environ['CLOUD_ENABLED'] != 'false':
+              raise SystemExit('Pause cloud monitoring through the local launcher before transferring state.')
+          if str(uuid.UUID(os.environ['HANDOFF_ID'])) != os.environ['HANDOFF_ID']:
+              raise SystemExit('Invalid handoff session')
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore existing encrypted history
+        if: inputs.mode == 'export'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ matrix.path }}
+          key: ${{ matrix.prefix }}export-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ matrix.prefix }}
+      - name: Export verified encrypted history
+        if: inputs.mode == 'export'
+        env:
+          MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
+        shell: bash
+        run: python handoff_state.py export --slot "$STATE_SLOT" --session "$HANDOFF_ID" --input "$STATE_PATH" --output .state/handoff.enc
+      - name: Downloadable encrypted handoff
+        if: inputs.mode == 'export'
+        uses: actions/upload-artifact@v4
+        with:
+          name: handoff-${{ matrix.slot }}
+          path: .state/handoff.enc
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Import local encrypted history
+        if: inputs.mode == 'import'
+        env:
+          MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
+          MONITOR_HANDOFF_01: ${{ secrets.MONITOR_HANDOFF_01 }}
+          MONITOR_HANDOFF_02: ${{ secrets.MONITOR_HANDOFF_02 }}
+          MONITOR_HANDOFF_03: ${{ secrets.MONITOR_HANDOFF_03 }}
+          MONITOR_HANDOFF_04: ${{ secrets.MONITOR_HANDOFF_04 }}
+          MONITOR_HANDOFF_05: ${{ secrets.MONITOR_HANDOFF_05 }}
+          MONITOR_HANDOFF_06: ${{ secrets.MONITOR_HANDOFF_06 }}
+          MONITOR_HANDOFF_07: ${{ secrets.MONITOR_HANDOFF_07 }}
+          MONITOR_HANDOFF_08: ${{ secrets.MONITOR_HANDOFF_08 }}
+        shell: bash
+        run: python handoff_state.py import --slot "$STATE_SLOT" --session "$HANDOFF_ID" --output "$STATE_PATH"
+      - name: Save imported encrypted history
+        if: inputs.mode == 'import'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ matrix.path }}
+          key: ${{ matrix.prefix }}handoff-${{ github.run_id }}-${{ github.run_attempt }}

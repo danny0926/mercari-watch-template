@@ -36,6 +36,8 @@ python -m patchright install chrome
 | `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` | 使用 LINE 時須同時設定 |
 | `MONITOR_STATE_KEY` | Fernet 加密金鑰；正式保存紀錄必填 |
 | `MONITOR_STATE_PATH` | 加密紀錄位置，預設 `.state/seen.enc` |
+| `MONITOR_GITHUB_REPOSITORY` | 本機交接用的 `owner/repo`，明確填自己的 fork；不從 Git remotes 推測 |
+| `LOCAL_MONITOR_INTERVAL_SECONDS` | 本機每輪完成後的等待秒數，預設 `1800`，最少 `60` |
 
 產生加密金鑰，放入自己的 `.env` 與同名 GitHub Secret，後續執行使用相同金鑰：
 
@@ -142,11 +144,40 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 停止時將 `MONITOR_ENABLED=false`；若要立即終止等待，也可取消 **Monitor clock** 正在等待的 run。已開始的來源工作可自行完成。重啟時設回 `true`，再執行一次 **Monitor clock**。工作被取消、workflow 被停用或持續 API 故障可能中斷接力；計時設定或交接失敗會向已設定的 Discord 通道發送警告，但故意取消不當作故障。來源健康警報只在程式啟動後運作，仍應核對最近的計時與監聽時間。
 
-去重紀錄只以 Fernet 加密檔存入 Actions Cache，金鑰保存在 Secrets；工作流程不再提交 `seen.json`。快取可能遭清除，缺少紀錄時會重新建立基準，不將現有商品整批推送。請保留加密金鑰，變更金鑰前需先清除舊加密紀錄。
+去重紀錄以 Fernet 加密檔存入 Actions Cache，金鑰保存在 Secrets；工作流程不再提交 `seen.json`。本機交接另使用短期加密 Artifact 與加密的 Secrets 傳輸，見下節。快取可能遭清除，缺少紀錄時會重新建立基準，不將現有商品整批推送；本機交接若找不到任一來源的雲端紀錄則停止，避免用不明紀錄接手。請保留加密金鑰，變更金鑰前需先清除舊加密紀錄。
 
 各目的地獨立保存發送結果，失敗只重試該目的地，成功目的地不受影響。預設目的地若同時設定 LINE 與 Discord，仍須兩者都成功才推進該目的地紀錄；其中一邊成功、分批中途失敗或送達後連線中斷時，該目的地先前成功的訊息可能重複。來源異常與恢復訊息也會送往對應目的地。Discord 限流依服務回傳時間做有限次重試。
 
 Discord Webhook 基本功能不需 Nitro。公開專案使用標準 GitHub-hosted runner 免費；私人專案受帳號免費額度與超額計費規則限制。[Discord 說明](https://discord.com/safety/using-webhooks-and-embeds)、[GitHub 計費](https://docs.github.com/en/billing/concepts/product-billing/github-actions)。
+
+## 本機監聽與雲端交接
+
+`local_monitor.py` 使用相同的私人條件、通知分流與篩選。啟動時暫停雲端自動監聽，正常停止時交回去重紀錄並恢復原先開關；不需要心跳服務、self-hosted runner 或額外雲端帳號。若雲端原先就停用，停止本機後也維持停用。
+
+先將程式與 `monitor-handoff.yml` 部署到自己 repo 的 `main`，完成上節雲端設定，安裝 [GitHub CLI](https://cli.github.com/)，執行 `gh auth login`。本機帳號須能讀取 Actions／Artifacts、啟動與取消 workflows、寫入 repo Variables 與 Secrets。沿用已登入的帳號即可，不將 GitHub token 寫入公開檔案。`.env` 另填 `MONITOR_GITHUB_REPOSITORY=owner/repo`，搜尋條件、通知憑證與 `MONITOR_STATE_KEY` 須與雲端一致。
+
+Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
+
+```powershell
+.\.venv\Scripts\python.exe -u local_monitor.py
+```
+
+程式先設 `LOCAL_MONITOR_ACTIVE=true`、`MONITOR_ENABLED=false`，取消雲端計時器並等待正在執行的商品監聽完成。它不會中途取消來源工作；正常交接仍需等候 GitHub 排隊與 runner 啟動。`Monitor state handoff` 將兩個來源分組的紀錄加密後輸出為一天有效的 Artifacts，本機驗證金鑰與交接代號後才開始搜尋。若任一分組缺少或無法解密，不啟動本機監聽。CI 測試不受開關影響；持有本機監聽權時，手動啟動的雲端商品監聽也會略過。
+
+**停止時按一次 Ctrl+C，等候「交接完成」後再關閉視窗。** 程式會完成當輪，將兩份紀錄壓縮後再以既有金鑰加密，經專用 Secrets 傳給 import workflow。兩個分組都成功存入原本的 Cache 後，才解除本機監聽權並恢復雲端計時。暫存 Secrets 隨後刪除；公開輸入僅包含隨機交接代號，不包含商品編號、搜尋條件或憑證。此流程有傳輸大小上限，超限時保留紀錄並停止交接。
+
+```powershell
+# 查看狀態，不切換監聽
+.\.venv\Scripts\python.exe local_monitor.py --status
+# 完整交接一次，但不搜尋、不發商品通知
+.\.venv\Scripts\python.exe -u local_monitor.py --handoff-only
+# 執行一輪正式本機監聽後交回雲端
+.\.venv\Scripts\python.exe -u local_monitor.py --once
+# 強制結束、斷電或交接失敗後，在原電腦重試交回紀錄
+.\.venv\Scripts\python.exe -u local_monitor.py --resume-cloud
+```
+
+本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或直接關閉視窗可能無法交還雲端，本版本不會自動故障接手。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋使用互動式瀏覽器，本機須已登入 Windows 且能啟動 Edge／Chrome。
 
 ## 資料與限制
 
