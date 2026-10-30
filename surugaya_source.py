@@ -2,6 +2,7 @@
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -9,6 +10,39 @@ from market_sources import SourceUnavailable
 
 HOST = "www.suruga-ya.jp"
 NEWEST = "modificationTime:descending"
+JST = timezone(timedelta(hours=9))
+
+
+class SurugayaUnavailable(SourceUnavailable):
+    """Expose only predefined diagnostics, never browser URLs or private queries."""
+
+    REASONS = {
+        "search-url": "Search URL was not confirmed",
+        "result-count": "Result count was not confirmed",
+        "search-filters": "Newest and available filters were not confirmed",
+        "product": "Product information was incomplete",
+        "condition-branch": "Condition branch was not confirmed",
+        "direct-link": "Direct product link was not confirmed",
+        "sale-layout": "Time-sale price layout was not confirmed",
+        "sale-period": "Time-sale period was not confirmed",
+        "sale-inactive": "Time-sale period is not currently active",
+        "offer-price": "Offer price was not confirmed",
+        "price-range": "Price range was invalid",
+        "offer-condition": "Multiple offers had the same condition",
+        "direct-offer": "Direct offer was not confirmed",
+        "browser-unavailable": "Browser is unavailable for this run",
+        "browser-request": "Browser request failed",
+    }
+
+    def __init__(self, code: str):
+        if code not in self.REASONS:
+            raise ValueError("Unknown Suruga-ya diagnostic code")
+        self.code = code
+        super().__init__(self.public_reason)
+
+    @property
+    def public_reason(self):
+        return self.REASONS[self.code]
 
 
 def surugaya_search_url(keyword: str) -> str:
@@ -50,14 +84,28 @@ EXTRACT_SEARCH = r"""() => {
         items: cards.map(card => {
             const price = card.querySelector('.item_price');
             const paragraphs = price ? [...price.querySelectorAll(':scope > p')] : [];
+            const text = element => {
+                if (!element) return '';
+                const clone = element.cloneNode(true);
+                clone.querySelectorAll('del,s,strike,.strike,[style*="line-through"]').forEach(x => x.remove());
+                return clone.textContent.replace(/\s+/g, ' ').trim();
+            };
+            const saleBlocks = paragraphs.filter(p => p.matches('.timesales'));
             return {
                 url: card.querySelector('.title a')?.href,
                 title: card.querySelector('.product-name')?.textContent.trim(),
                 image: card.querySelector('.photo_box img')?.src || '',
-                prices: paragraphs.map(p => {
-                    const clone = p.cloneNode(true);
-                    clone.querySelectorAll('del,s,strike,[style*="line-through"]').forEach(x => x.remove());
-                    return clone.textContent.replace(/\s+/g, ' ').trim();
+                prices: paragraphs.map(text),
+                saleOffers: saleBlocks.map(block => {
+                    // Native sale cards put the condition label and current price
+                    // directly after this block. Nested marketplace prices are excluded.
+                    const normal = block.nextElementSibling;
+                    const current = normal?.nextElementSibling;
+                    return {
+                        condition: normal?.matches('p.price_normal') ? text(normal) : '',
+                        price: current?.matches('p.price_teika') ? text(current) : '',
+                        period: text(block.querySelector('.timesaleSpan')),
+                    };
                 }),
                 soldOut: paragraphs.some(p => /^品切れ\s*$/.test(p.textContent.trim())),
                 marketplace: !!price?.querySelector('.makeplaTit'),
@@ -69,16 +117,51 @@ EXTRACT_SEARCH = r"""() => {
 }"""
 
 
-def parse_surugaya_results(data: dict, keyword: str) -> list[SurugayaItem]:
+def _offer_amounts(low: str, high: str | None) -> tuple[int, int]:
+    low, high = int(low.replace(",", "")), int((high or low).replace(",", ""))
+    if not 0 < low <= high:
+        raise SurugayaUnavailable("price-range")
+    return low, high
+
+
+def _sale_offers(raw: dict, now: datetime):
+    sales = raw.get("saleOffers")
+    if not isinstance(sales, list) or not sales:
+        raise SurugayaUnavailable("sale-layout")
+    offers = []
+    for sale in sales:
+        if not isinstance(sale, dict) or sale.get("condition") not in ("中古通常価格", "新品通常価格"):
+            raise SurugayaUnavailable("sale-layout")
+        price = re.fullmatch(r"[￥¥]([\d,]+)(?:\s*[～〜~]\s*[￥¥]([\d,]+))?\s*税込", sale.get("price") or "")
+        if not price:
+            raise SurugayaUnavailable("sale-layout")
+        period = re.fullmatch(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*から\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*まで",
+                              sale.get("period") or "")
+        if not period:
+            raise SurugayaUnavailable("sale-period")
+        try:
+            start, end = (datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=JST) for value in period.groups())
+        except ValueError:
+            raise SurugayaUnavailable("sale-period") from None
+        if end < start:
+            raise SurugayaUnavailable("sale-period")
+        if not start <= now <= end:
+            raise SurugayaUnavailable("sale-inactive")
+        low, high = _offer_amounts(*price.groups())
+        offers.append((sale["condition"][:2], low, high, end))
+    return offers
+
+
+def parse_surugaya_results(data: dict, keyword: str, *, now: datetime | None = None) -> list[SurugayaItem]:
     parsed = urlparse(data.get("url", ""))
     params = parse_qs(parsed.query)
     if (parsed.scheme != "https" or parsed.hostname != HOST or parsed.path != "/search"
             or params.get("search_word") != [keyword] or params.get("inStock") != ["Off"]
             or params.get("rankBy") != [NEWEST]):
-        raise SourceUnavailable("Suruga-ya search URL was not confirmed")
+        raise SurugayaUnavailable("search-url")
     hit = re.fullmatch(r"該当件数[:：]\s*([\d,]+)件中\s*([\d,]+)\s*-\s*([\d,]+)件", data.get("hit") or "")
     if not hit or not isinstance(data.get("items"), list):
-        raise SourceUnavailable("Suruga-ya result count was not confirmed")
+        raise SurugayaUnavailable("result-count")
     total, first, last = (int(value.replace(",", "")) for value in hit.groups())
     # The genuine empty page omits the result container and sorting controls.
     if total == first == last == 0 and not data["items"]:
@@ -86,44 +169,44 @@ def parse_surugaya_results(data: dict, keyword: str) -> list[SurugayaItem]:
     if (data.get("sort") != NEWEST or data.get("stock") != "Off" or data.get("stockOff") is not True
             or data.get("query") != keyword or not data.get("hasRoot") or not 0 < first <= last <= total
             or len(data["items"]) != last - first + 1):
-        raise SourceUnavailable("Suruga-ya newest and available filters were not confirmed")
+        raise SurugayaUnavailable("search-filters")
+    now = now or datetime.now(JST)
     unique = {}
     for raw in data["items"]:
         item_url = urlparse(raw.get("url") or "")
         match = re.fullmatch(r"/product/(?:detail|other)/([A-Za-z0-9]+)", item_url.path)
         if item_url.scheme != "https" or item_url.hostname != HOST or not match or not raw.get("title"):
-            raise SourceUnavailable("Incomplete Suruga-ya product")
+            raise SurugayaUnavailable("product")
         branch = parse_qs(item_url.query).get("branch_number", ["0000"])
         if len(branch) != 1 or not re.fullmatch(r"\d{4}", branch[0]):
-            raise SourceUnavailable("Suruga-ya condition branch was not confirmed")
+            raise SurugayaUnavailable("condition-branch")
         if raw.get("soldOut") or raw.get("reservation"):
             continue
         if not item_url.path.startswith("/product/detail/"):
-            raise SourceUnavailable("Suruga-ya direct product link was not confirmed")
-        # A time-sale layout must be supported explicitly before quoting it.
-        if raw.get("timeSale"):
-            raise SourceUnavailable("Suruga-ya time-sale price needs verification")
-        offers = []
+            raise SurugayaUnavailable("direct-link")
+        offers = _sale_offers(raw, now) if raw.get("timeSale") else []
         for text in raw.get("prices", []):
             if re.match(r"^(中古|新品)[:：]", text):
                 offer = re.fullmatch(r"(中古|新品)[:：]\s*[￥¥]([\d,]+)(?:\s*[～〜~]\s*[￥¥]([\d,]+))?\s*税込", text)
                 if not offer:
-                    raise SourceUnavailable("Suruga-ya offer price was not confirmed")
+                    raise SurugayaUnavailable("offer-price")
                 condition, low, high = offer.groups()
-                low, high = int(low.replace(",", "")), int((high or low).replace(",", ""))
-                if not 0 < low <= high:
-                    raise SourceUnavailable("Invalid Suruga-ya price range")
-                offers.append((condition, low, high))
+                low, high = _offer_amounts(low, high)
+                offers.append((condition, low, high, None))
+        if len({offer[0] for offer in offers}) != len(offers):
+            raise SurugayaUnavailable("offer-condition")
         if not offers and not raw.get("marketplace"):
-            raise SourceUnavailable("Suruga-ya direct offer was not confirmed")
+            raise SurugayaUnavailable("direct-offer")
         # Marketplace-only cards have no verified individual seller/condition offer.
-        for condition, low, high in offers:
+        for condition, low, high, sale_end in offers:
             identity = f"surugaya:{match[1]}:{branch[0]}:{'used' if condition == '中古' else 'new'}"
             image = raw.get("image") or ""
             canonical = f"https://{HOST}/product/detail/{match[1]}"
             if branch[0] != "0000":
                 canonical += "?" + urlencode({"branch_number": branch[0]})
             note = f"駿河屋本店・{condition}・含稅，運費及手續費另計"
+            if sale_end:
+                note += f"；限時特價至 {sale_end:%Y-%m-%d %H:%M:%S}（日本時間），以結帳時為準"
             if high != low:
                 note += "；多種品況起價，請開啟商品頁核對"
             unique[identity] = SurugayaItem(
@@ -184,7 +267,7 @@ class SurugayaSearch:
 
     async def search(self, keyword: str) -> list[SurugayaItem]:
         if self.unavailable:
-            raise SourceUnavailable("Suruga-ya browser unavailable for this run")
+            raise SurugayaUnavailable("browser-unavailable")
         if keyword in self.cache:
             return list(self.cache[keyword])
         try:
@@ -228,4 +311,4 @@ class SurugayaSearch:
         except Exception as error:
             # Do not repeat a browser/challenge failure for every private keyword.
             self.unavailable = True
-            raise SourceUnavailable("Suruga-ya browser request failed") from error
+            raise SurugayaUnavailable("browser-request") from error

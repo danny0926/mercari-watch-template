@@ -241,15 +241,21 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.seen_path.read_bytes(), before)
 
     def test_failed_search_keeps_state_and_hides_error_details(self):
-        self.seen_path.write_text(json.dumps({"sample": ["one"]}))
-        output, error = io.StringIO(), io.StringIO()
-        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=RuntimeError("sensitive-query"))), patch.object(app, "line_push") as send, contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
-            self.assertEqual(asyncio.run(app.check_once()), 1)
-            send.assert_not_called()
-        state = json.loads(self.seen_path.read_text())
-        self.assertEqual(state["sample"], ["one"])
-        self.assertEqual(state["_health"]["fails"], 1)
-        self.assertNotIn("sensitive-query", output.getvalue() + error.getvalue())
+        specific = app.SurugayaUnavailable("sale-layout")
+        specific.__cause__ = RuntimeError("sensitive-query")
+        for failure in (RuntimeError("sensitive-query"), specific):
+            with self.subTest(failure=type(failure).__name__):
+                self.seen_path.write_text(json.dumps({"sample": ["one"]}))
+                output, error = io.StringIO(), io.StringIO()
+                with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=failure)), patch.object(app, "line_push") as send, contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                    self.assertEqual(asyncio.run(app.check_once()), 1)
+                    send.assert_not_called()
+                state = json.loads(self.seen_path.read_text())
+                self.assertEqual(state["sample"], ["one"])
+                self.assertEqual(state["_health"]["fails"], 1)
+                self.assertNotIn("sensitive-query", output.getvalue() + error.getvalue())
+                if failure is specific:
+                    self.assertIn("[sale-layout] Time-sale price layout was not confirmed", error.getvalue())
 
     def test_notification_chunks_keep_all_items_without_duplicates(self):
         records = [app.to_record(item(str(i)), watch()) for i in range(26)]

@@ -1,11 +1,12 @@
 import asyncio
 import unittest
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import mercari_watch as app
 from market_sources import SourceUnavailable
-from surugaya_source import NEWEST, SurugayaSearch, parse_surugaya_results, surugaya_search_url
+from surugaya_source import JST, NEWEST, SurugayaSearch, parse_surugaya_results, surugaya_search_url
 
 
 def card(**changes):
@@ -53,6 +54,44 @@ class SurugayaTests(unittest.TestCase):
         self.assertTrue(item.url.endswith("branch_number=0010"))
         self.assertIn("起價", item.price_note)
         self.assertEqual(app.price_label(app.to_record(item, {"id": "sample", "keyword": "example"})), "¥1,200 起")
+
+    def test_time_sale_uses_current_direct_price_and_retains_identity(self):
+        now = datetime(2030, 1, 2, 12, tzinfo=JST)
+        for condition, amount, expected in [("中古", "￥900 税込", 900), ("新品", "￥900 ～ ￥1,100 税込", 900)]:
+            with self.subTest(condition=condition):
+                regular = card(prices=[f"{condition}：￥1,200 税込"])
+                sale = {"condition": condition + "通常価格", "price": amount,
+                        "period": "2030-01-02 11:00:00 から2030-01-03 11:59:59 まで"}
+                discounted = card(timeSale=True, saleOffers=[sale], prices=[
+                    f"{condition}通常価格 ￥1,200", amount, "定価：￥9,999", "1,500円以上は送料無料",
+                ])
+                before = parse_surugaya_results(data([regular]), "example")[0]
+                item = parse_surugaya_results(data([discounted]), "example", now=now)[0]
+                self.assertEqual((item.id_, item.url), (before.id_, before.url))
+                self.assertEqual(item.real_price, expected)
+                self.assertIn("限時特價至 2030-01-03 11:59:59（日本時間）", item.price_note)
+                self.assertEqual(item.price_from, condition == "新品")
+
+    def test_unverified_or_inactive_sale_prices_fail_closed(self):
+        now = datetime(2030, 1, 2, 12, tzinfo=JST)
+        sale = {"condition": "中古通常価格", "price": "￥900 税込",
+                "period": "2030-01-02 11:00:00 から2030-01-03 11:59:59 まで"}
+        invalid_sales = [
+            [], [{**sale, "condition": "マケプレ"}], [{**sale, "price": "定価：￥9,999"}],
+            [{**sale, "price": "￥1,200 ￥900 税込"}], [{**sale, "price": "￥0 税込"}],
+            [{**sale, "period": "2030-02-30 11:00:00 から2030-03-03 11:59:59 まで"}],
+            [{**sale, "period": "2030-01-03 11:00:00 から2030-01-02 11:59:59 まで"}],
+            [sale, sale],
+        ]
+        for sales in invalid_sales:
+            with self.subTest(sales=sales), self.assertRaises(SourceUnavailable):
+                parse_surugaya_results(data([card(timeSale=True, saleOffers=sales)]), "example", now=now)
+        row = card(timeSale=True, saleOffers=[sale], prices=[])
+        for outside in (now - timedelta(days=1), now + timedelta(days=2)):
+            with self.subTest(now=outside), self.assertRaises(SourceUnavailable):
+                parse_surugaya_results(data([row]), "example", now=outside)
+        with self.assertRaises(SourceUnavailable):
+            parse_surugaya_results(data([card(timeSale=True, saleOffers=[sale])]), "example", now=now)
 
     def test_unavailable_and_marketplace_only_goods_are_excluded(self):
         rows = [card(soldOut=True, url="https://www.suruga-ya.jp/product/other/EXAMPLE100"),

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Read verified direct-store time-sale prices separately from crossed-out regular prices, retail prices, shipping thresholds and marketplace offers.
+- Validate sale periods in Japanese time and label their deadlines while preserving existing condition identities and encrypted deduplication history.
+- Report predefined Suruga-ya failure reasons without exposing private queries or browser exception details.
+
 ## 0.5.0
 
 - Support optional title/description matching on verified Mercari listings, with shared detail caching and explicitly labeled review candidates.

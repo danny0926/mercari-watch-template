@@ -32,10 +32,10 @@ from mercapi import Mercapi
 from mercapi.requests.search import SearchRequestData
 from market_sources import TaiwanSearch
 from yahoo_sources import YahooSearch
-from surugaya_source import SurugayaSearch
+from surugaya_source import SurugayaSearch, SurugayaUnavailable
 
 BASE = Path(__file__).parent
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 WATCHLIST = BASE / "watchlist.json"
 SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID
@@ -684,7 +684,8 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 except Exception as e:
                     errors += 1
                     source_outcomes.setdefault((route, source), []).append(False)
-                    print(f"{source} 搜尋失敗：{type(e).__name__}", file=sys.stderr)
+                    detail = f" [{e.code}] {e.public_reason}" if isinstance(e, SurugayaUnavailable) else ""
+                    print(f"{source} 搜尋失敗：{type(e).__name__}{detail}", file=sys.stderr)
                     continue
                 token = wid + ":" + source
                 if route != DEFAULT_WEBHOOK_ENV:
