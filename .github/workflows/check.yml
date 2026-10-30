@@ -71,7 +71,8 @@ jobs:
                       raise ValueError('Invalid reference')
                   known = state.get('_known_by_route', {}).get(reference['route'], [])
                   history = state.get(reference['watch_id'], [])
-                  print(json.dumps({'reference': index + 1, 'seen_or_baselined': any(i in known for i in identities), 'profile_history_known': any(i in history for i in identities), 'has_source_baseline': any(token.startswith(reference['route'] + ':' + reference['watch_id'] + ':') for token in state.get('_baselines', []))}), flush=True)
+                  receipts = state.get('_notification_receipts', {}).get(reference['route'], {})
+                  print(json.dumps({'reference': index + 1, 'seen_or_baselined': any(i in known for i in identities), 'profile_history_known': any(i in history for i in identities), 'has_delivery_receipt': any(i in receipts for i in identities), 'has_source_baseline': any(token.startswith(reference['route'] + ':' + reference['watch_id'] + ':') for token in state.get('_baselines', []))}), flush=True)
           except Exception as error:
               raise SystemExit(f'Private history audit failed ({type(error).__name__}); details omitted') from None
       - name: Install Taiwan probe browser

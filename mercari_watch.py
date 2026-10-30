@@ -21,7 +21,7 @@ import re
 import sys
 import time
 import uuid
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,7 +35,7 @@ from yahoo_sources import YahooSearch
 from surugaya_source import SurugayaSearch
 
 BASE = Path(__file__).parent
-VERSION = "0.4.6"
+VERSION = "0.5.0"
 WATCHLIST = BASE / "watchlist.json"
 SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID
@@ -105,10 +105,51 @@ def passes_filters(it, w: dict) -> bool:
     return True
 
 
-async def search_new(m: Mercapi, w: dict, taiwan=None, external=None):
+async def extended_match(it, w: dict, m: Mercapi, cache: dict) -> bool:
+    required = w.get("must_match_anywhere", [])
+    excluded = w.get("must_not_match_anywhere", [])
+    if not required and not excluded:
+        return True
+    title = it.name or ""
+    if any(re.search(pattern, title, re.IGNORECASE) for pattern in excluded):
+        return False
+    title_matches = all(re.search(pattern, title, re.IGNORECASE) for pattern in required)
+    description = None
+    if not title_matches or excluded:
+        identity = item_identity(it)
+        if identity not in cache:
+            description = None
+            try:
+                if re.fullmatch(r"m\d+", it.id_):
+                    detail = await m.item(it.id_)
+                elif it.item_type == "ITEM_TYPE_BEYOND" and re.fullmatch(r"[A-Za-z0-9]{22}", it.id_):
+                    detail = await m.product(it.id_)
+                else:
+                    detail = None
+                detail = getattr(detail, "product_detail", detail)
+                if detail is not None and isinstance(getattr(detail, "description", None), str):
+                    description = detail.description
+            except Exception:
+                pass
+            cache[identity] = description
+        description = cache[identity]
+        if description and any(re.search(pattern, description, re.IGNORECASE) for pattern in excluded):
+            return False
+    text_matches = all(re.search(pattern, title, re.IGNORECASE)
+                       or (description and re.search(pattern, description, re.IGNORECASE)) for pattern in required)
+    # If exclusion rules require unavailable details, do not claim confirmation.
+    verified = text_matches and (not excluded or description is not None)
+    if not verified and not w.get("review_unconfirmed", False):
+        return False
+    it.match_evidence = ("title" if title_matches else "description") if verified else "review"
+    return True
+
+
+async def search_new(m: Mercapi, w: dict, taiwan=None, external=None, detail_cache=None):
     # 同一商品的不同叫法分開搜尋；全部成功才保存這組的已看紀錄。
     keywords = list(dict.fromkeys(w.get("keywords") or [w["keyword"]]))
     found = {}
+    detail_cache = {} if detail_cache is None else detail_cache
     for index, keyword in enumerate(keywords):
         if index:
             await asyncio.sleep(DELAY_BETWEEN)
@@ -142,7 +183,7 @@ async def search_new(m: Mercapi, w: dict, taiwan=None, external=None):
             items = res.items
         print(f"搜尋回傳 {len(items)} 筆")
         for it in items:
-            if passes_filters(it, w):
+            if passes_filters(it, w) and await extended_match(it, w, m, detail_cache):
                 found[item_identity(it)] = it
     return list(found.values())
 
@@ -161,6 +202,7 @@ def to_record(it, w: dict) -> dict:
         "thumbnail": (it.thumbnails or [None])[0],
         "is_auction": is_auction(it),
         "review_note": w.get("review_note", ""),
+        "match_evidence": getattr(it, "match_evidence", None),
         "price_note": getattr(it, "price_note", ""),
         "price_from": getattr(it, "price_from", False),
         "bid_deadline": None,
@@ -172,6 +214,8 @@ def to_record(it, w: dict) -> dict:
         rec["total_bid"] = getattr(a, "total_bid", None)
         if getattr(a, "highest_bid", None):
             rec["price"] = a.highest_bid
+    if rec["match_evidence"] == "review":
+        rec["name"] = "【候補】" + rec["name"]
     return rec
 
 
@@ -249,6 +293,8 @@ def bubble(x: dict) -> dict:
     ]
     if x.get("review_note"):
         body.append(_text(x["review_note"], size="xxs", color="#888888", wrap=True))
+    if x.get("match_evidence") in ("description", "review"):
+        body.append(_text("商品說明符合條件" if x["match_evidence"] == "description" else "候補：角色尚未確認，請核對內容", size="xs", wrap=True))
     if x.get("price_note"):
         body.append(_text(x["price_note"], size="xxs", color="#888888", wrap=True))
     if x["is_auction"]:
@@ -393,6 +439,8 @@ def build_discord_messages(items: list[dict]) -> list[dict]:
             shop = str(x["item_id"]).startswith("shops:")
             embed["fields"].append({"name": "Shops 商品編號" if shop else "日本商品編號",
                                     "value": mercari_proxy_id(x), "inline": True})
+        if x.get("match_evidence") in ("description", "review"):
+            embed["fields"].append({"name": "判斷依據", "value": "商品說明符合條件" if x["match_evidence"] == "description" else "候補：角色尚未確認，請核對內容", "inline": False})
         if proxy_mode:
             copied = list(dict.fromkeys(originals.values()))
             embed["fields"].append({"name": "原站網址（僅供複製，可能轉區）",
@@ -530,12 +578,18 @@ def load_watchlist() -> list[dict]:
         keywords = w.get("keywords", [])
         if not isinstance(keywords, list) or any(not isinstance(k, str) or not k.strip() for k in keywords):
             raise ValueError("keywords 必須是非空白搜尋詞陣列，或留空陣列")
-        for field in ("must_match", "must_not_match"):
+        for field in ("must_match", "must_not_match", "must_match_anywhere", "must_not_match_anywhere"):
             patterns = w.get(field, [])
             if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
                 raise ValueError("篩選規則必須是字串陣列")
             for pattern in patterns:
                 re.compile(pattern)
+        if not isinstance(w.get("review_unconfirmed", False), bool):
+            raise ValueError("review_unconfirmed 須為布林值")
+        catchup_ids = w.get("catchup_ids", [])
+        if not isinstance(catchup_ids, list) or len(catchup_ids) > 50 or any(
+                not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9:_-]+", identity) for identity in catchup_ids):
+            raise ValueError("catchup_ids 須為最多 50 個刊登編號的陣列")
         for field in ("price_min", "price_max"):
             price = w.get(field)
             if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float)) or price < 0):
@@ -597,6 +651,9 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
     baselines = list(seen.get("_baselines", []))
     baseline_records = {}
     source_outcomes = {}
+    detail_cache = {}
+    catchup_done = {route: set(values) for route, values in seen.get("_catchup_done_by_route", {}).items()}
+    receipts = {route: dict(values) for route, values in seen.get("_notification_receipts", {}).items()}
 
     async with (TaiwanSearch() as taiwan, YahooSearch("yahoo_fleamarket") as fleamarket,
                 SurugayaSearch() as surugaya):
@@ -606,6 +663,11 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
             route = webhook_env_for(w)
             known = known_by_route[route]
             route_candidates = candidates.setdefault(route, {})
+            catchup_done.setdefault(route, set())
+            receipts.setdefault(route, {})
+            requested_catchup = set(w.get("catchup_ids", []))
+            catchup_done[route].update(requested_catchup.intersection(receipts[route]))
+            pending_catchup = requested_catchup - catchup_done[route]
             for source in w.get("sources", ["jp"]):
                 source_watch = {**w, "source": source}
                 source_watch["keywords"] = w.get("source_keywords", {}).get(source, w.get("keywords", []))
@@ -616,7 +678,7 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                     print("tw 搜尋失敗：台灣來源請使用不限價條件", file=sys.stderr)
                     continue
                 try:
-                    items = await search_new(m, source_watch, taiwan, external)
+                    items = await search_new(m, source_watch, taiwan, external, detail_cache=detail_cache)
                     searched += 1
                     source_outcomes.setdefault((route, source), []).append(True)
                 except Exception as e:
@@ -632,21 +694,26 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 identities = [item_identity(it) for it in items]
                 count = sum(identity not in known for identity in identities)
                 print(f"{source} 本次 {len(items)} 筆符合，新品 {count} 筆"
-                      + ("（首次執行，只建立基準不通知）" if first_run else ""))
+                      + ("（首次建立基準；僅指定補查項目可通知）" if first_run else ""))
                 if token not in baselines:
                     baselines.append(token)
                 if first_run:
-                    baseline_ids = [identity for identity in identities if identity not in route_candidates]
+                    baseline_ids = [identity for identity in identities if identity not in route_candidates and identity not in pending_catchup]
                     baseline_known[route].update(baseline_ids)
                     baseline_records.setdefault(route, {}).setdefault(wid, []).extend(baseline_ids)
                 for it in items:
                     identity = item_identity(it)
                     if identity in route_candidates:
                         route_candidates[identity] = merge_records(route_candidates[identity], to_record(it, w))
-                    elif not first_run and identity not in known:
+                    elif identity in pending_catchup or (not first_run and identity not in known):
                         if source == "surugaya" and not dry_run:
                             await surugaya.prepare_item(it)
                         route_candidates[identity] = to_record(it, w)
+                    if identity in pending_catchup and identity in route_candidates:
+                        record = route_candidates[identity]
+                        if record.get("notification_reason") != "catchup":
+                            record["name"] = "【補查】" + record["name"]
+                        record["notification_reason"] = "catchup"
                     known.add(identity)
                 previous_ids = new_seen.get(wid, [])
                 fresh_ids = [identity for identity in identities if identity not in previous_ids]
@@ -670,9 +737,19 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 new_seen[wid] = list(dict.fromkeys(identities + seen.get(wid, [])))[:SEEN_KEEP]
             known_by_route[route] = baseline_known[route]
             errors += 1
+        elif items:
+            timestamp = datetime.now(timezone.utc).isoformat()
+            for identity, record in items.items():
+                reason = record.get("notification_reason", "live")
+                receipts[route][identity] = {"sent_at": timestamp, "reason": reason,
+                                            "evidence": record.get("match_evidence") or "title"}
+                if reason == "catchup":
+                    catchup_done[route].add(identity)
     new_seen["_known_by_route"] = {route: sorted(values) for route, values in known_by_route.items()}
     new_seen["_known"] = sorted(known_by_route[DEFAULT_WEBHOOK_ENV])
     new_seen["_baselines"] = baselines
+    new_seen["_catchup_done_by_route"] = {route: sorted(values) for route, values in catchup_done.items() if values}
+    new_seen["_notification_receipts"] = {route: dict(sorted(values.items(), key=lambda entry: entry[1]["sent_at"])[-SEEN_KEEP:]) for route, values in receipts.items() if values}
 
     # 健康狀態：全部搜尋都失敗才算一次失敗
     health = dict(seen.get(HEALTH_KEY, {"fails": 0, "alerted": False}))

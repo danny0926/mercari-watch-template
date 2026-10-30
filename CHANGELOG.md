@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Support optional title/description matching on verified Mercari listings, with shared detail caching and explicitly labeled review candidates.
+- Add controlled, one-time catchup references that retain normal quiet baselines and retry failed delivery.
+- Record recent successful notification receipts separately from previously known/baselined identities.
+- Add a read-only encrypted history audit without exposing private listing references or search conditions.
+
 ## 0.4.6
 
 - Recognize the Taiwan storefront's native empty-results component instead of relying on incomplete text patterns.

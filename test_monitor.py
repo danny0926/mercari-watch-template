@@ -171,6 +171,57 @@ class MonitorTests(unittest.TestCase):
                     self.assertEqual(len(asyncio.run(source.search("example"))), 1)
                 self.assertEqual(source._search_once.await_count, attempts)
 
+    def test_extended_matching_uses_exact_listing_description_and_keeps_uncertainty_visible(self):
+        rule = watch(must_match_anywhere=["角色乙"], must_not_match_anywhere=["不含角色乙"])
+        api = Obj(item=AsyncMock(return_value=Obj(description="商品包含角色甲與角色乙")))
+        listing = item("m100", name="系列甲 模型套組")
+        cache = {}
+        self.assertTrue(asyncio.run(app.extended_match(listing, rule, api, cache)))
+        self.assertEqual(listing.match_evidence, "description")
+        self.assertTrue(asyncio.run(app.extended_match(listing, rule, api, cache)))
+        api.item.assert_awaited_once_with("m100")
+        rec = app.to_record(listing, rule)
+        self.assertEqual(rec["name"], listing.name)
+        self.assertIn("商品說明符合條件", json.dumps(app.build_discord_messages([rec]), ensure_ascii=False))
+        self.assertFalse(asyncio.run(app.extended_match(item("m101", name="模型套組"), rule, api, {"m101": "不含角色乙"})))
+        for description in (None, "角色甲單品"):
+            uncertain = item("m102", name="模型套組")
+            self.assertFalse(asyncio.run(app.extended_match(uncertain, rule, api, {"m102": description})))
+            self.assertTrue(asyncio.run(app.extended_match(uncertain, {**rule, "review_unconfirmed": True}, api, {"m102": description})))
+            candidate = app.to_record(uncertain, rule)
+            self.assertTrue(candidate["name"].startswith("【候補】"))
+            self.assertIn("角色尚未確認", json.dumps(app.build_discord_messages([candidate]), ensure_ascii=False))
+
+    def test_requested_catchup_preserves_baseline_and_records_success_once(self):
+        self.write_watches([watch(catchup_ids=["old"] )])
+        self.seen_path.write_text(json.dumps({"sample": ["old"], "_known": ["old"], "_baselines": ["sample:jp"]}))
+        listings = [item("old"), item("new")]
+        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(return_value=listings)), patch.object(app, "notify", return_value=True) as send:
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(send.call_count, 1)
+            records = {r["item_id"]: r for r in send.call_args.args[0]}
+            self.assertTrue(records["old"]["name"].startswith("【補查】"))
+            self.assertEqual(records["old"]["notification_reason"], "catchup")
+            self.assertNotIn("notification_reason", records["new"])
+            state = json.loads(self.seen_path.read_text())
+            self.assertEqual(state["_catchup_done_by_route"][app.DEFAULT_WEBHOOK_ENV], ["old"])
+            self.assertEqual(state["_notification_receipts"][app.DEFAULT_WEBHOOK_ENV]["old"]["reason"], "catchup")
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(send.call_count, 1)
+
+    def test_first_baseline_only_sends_explicit_catchup_and_retries_failed_delivery(self):
+        self.write_watches([watch(catchup_ids=["m100"])])
+        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(return_value=[item("m100"), item("m200")])), patch.object(app, "notify", side_effect=[False, True]) as send:
+            self.assertEqual(self.run_check(), 1)
+            failed = json.loads(self.seen_path.read_text())
+            self.assertNotIn("_notification_receipts", {k: v for k, v in failed.items() if v})
+            self.assertEqual(failed["_known"], ["m200"])
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(send.call_count, 2)
+            self.assertTrue(all([r["item_id"] for r in call.args[0]] == ["m100"] for call in send.call_args_list))
+            succeeded = json.loads(self.seen_path.read_text())
+            self.assertEqual(set(succeeded["_known"]), {"m100", "m200"})
+
     def test_notify_failure_keeps_old_state_then_success_advances_it(self):
         self.seen_path.write_text(json.dumps({"sample": ["one"]}))
         with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(return_value=[item(), item("two")])), patch.object(app, "notify", return_value=False):
