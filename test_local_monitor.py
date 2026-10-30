@@ -142,6 +142,28 @@ class LocalMonitorTests(unittest.TestCase):
         self.assertTrue(self.monitor.wait_for_next_cycle())
         self.assertTrue(self.monitor.stop.is_set())
 
+    def test_maintenance_restart_keeps_existing_histories_and_cloud_pause(self):
+        self.run_local(handoff_only=True)
+        self.monitor.save(phase="local")
+        self.gh.values.update(MONITOR_ENABLED="false", LOCAL_MONITOR_ACTIVE="true")
+        self.gh.events.clear()
+        self.monitor.interval = 300
+        def run():
+            self.assertEqual(self.gh.values["MONITOR_ENABLED"], "false")
+            self.assertEqual(read_state(self.monitor.paths()["core"], self.key)["_known"], ["example-core"])
+            self.assertEqual(self.monitor.interval, 300)
+            self.assertEqual(self.gh.events, [])
+            return 0
+        with patch.object(self.monitor, "preflight"), patch.object(self.monitor, "run_local", run), \
+                patch.object(self.monitor, "restore") as restore:
+            self.assertEqual(self.monitor.continue_local(), 0)
+            restore.assert_called_once()
+        self.gh.values["MONITOR_ENABLED"] = "true"
+        with patch.object(self.monitor, "preflight"), patch.object(self.monitor, "run_local") as run, \
+                self.assertRaises(local.HandoffError):
+            self.monitor.continue_local()
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

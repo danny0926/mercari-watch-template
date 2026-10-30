@@ -168,6 +168,8 @@ Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
 
 若本機監聽在背景執行，可雙擊 `stop-local.cmd` 或執行 `python local_monitor.py --stop`，要求完成當輪後交還雲端。`--status` 會顯示最近一輪完成時間與來源錯誤數，方便確認本機是否已實際執行搜尋。
 
+等待時間從 `.env` 的 `LOCAL_MONITOR_INTERVAL_SECONDS` 讀取，`--status` 顯示程序實際採用的秒數。這是每輪完成後的等待時間；搜尋耗時另外計算，且不會重疊執行。變更設定需重啟程序。維護重啟可在確認上一輪已保存、舊程序已停止後使用 `--continue-local`，沿用同一份本機紀錄並維持雲端停用；它仍會驗證監聽權、程序鎖與加密紀錄。
+
 ```powershell
 # 查看狀態，不切換監聽
 .\.venv\Scripts\python.exe local_monitor.py --status

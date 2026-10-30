@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.2
+
+- Allow controlled local maintenance restarts to retain saved histories and cloud ownership without a cloud handback.
+- Show the effective local wait interval in runtime status and preserve sequential, non-overlapping scans.
+
 ## 0.6.1
 
 - Add a graceful stop command for a local monitor running in the background, preserving the active round and encrypted handback.

@@ -290,6 +290,36 @@ class LocalMonitor:
             self.stop.wait(min(1, remaining))
         return True
 
+    def run_local(self, once=False):
+        self.save(interval_seconds=self.interval, pid=os.getpid())
+        print(f"本機已接手，每輪完成後等待 {self.interval} 秒。", flush=True)
+        print("按 Ctrl+C 或使用 --stop，會完成當輪後交還雲端。", flush=True)
+        errors = 0
+        while not self.stop_requested():
+            errors = self.cycle()
+            self.save(last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
+                      last_cycle_errors=errors, pid=os.getpid())
+            print(f"本機本輪完成：{errors} 個來源錯誤。", flush=True)
+            if once or self.wait_for_next_cycle():
+                break
+        return 1 if errors else 0
+
+    def continue_local(self):
+        """Continue saved local ownership after a controlled maintenance restart."""
+        self.preflight()
+        self.claim = self.previous()
+        if not self.claim or self.claim["phase"] != "local" or not self.claim.get("states_ready"):
+            raise HandoffError("沒有可延續的本機監聽紀錄；請使用正常啟動或 --resume-cloud。")
+        flags = self.gh.flags()
+        if flags.get("LOCAL_MONITOR_ACTIVE") != "true" or flags.get("MONITOR_ENABLED") != "false":
+            raise HandoffError("無法確認本機監聽權；不覆蓋雲端紀錄。")
+        for path in self.paths().values():
+            read_state(path, self.key)
+        try:
+            return self.run_local()
+        finally:
+            self.restore()
+
     def start(self, once=False, handoff_only=False):
         self.preflight()
         previous = self.previous()
@@ -312,14 +342,7 @@ class LocalMonitor:
             self.save(phase="exporting")
             self.download(self.transfer("export"))
             if not handoff_only:
-                print("本機已接手。按 Ctrl+C 會完成當輪後交還雲端，請勿直接關閉視窗。", flush=True)
-                while not self.stop_requested():
-                    errors = self.cycle()
-                    self.save(last_cycle_completed_at=datetime.now(timezone.utc).isoformat(),
-                              last_cycle_errors=errors, pid=os.getpid())
-                    print(f"本機本輪完成：{errors} 個來源錯誤。", flush=True)
-                    if once or self.wait_for_next_cycle():
-                        break
+                return self.run_local(once)
         finally:
             self.restore()
         return 1 if errors else 0
@@ -346,6 +369,7 @@ def main():
     modes.add_argument("--resume-cloud", action="store_true", help="將前次本機紀錄交回並恢復雲端")
     modes.add_argument("--status", action="store_true", help="唯讀查看雲端開關與本機交接階段")
     modes.add_argument("--stop", action="store_true", help="要求正在執行的本機監聽完成當輪後交還雲端")
+    modes.add_argument("--continue-local", action="store_true", help="維護重啟後沿用已保存的本機紀錄，雲端保持停用")
     args = parser.parse_args()
     try:
         github = GitHub(os.environ.get("MONITOR_GITHUB_REPOSITORY", "").strip())
@@ -357,6 +381,7 @@ def main():
             print(json.dumps({"cloud_enabled": flags.get("MONITOR_ENABLED"),
                               "local_active": flags.get("LOCAL_MONITOR_ACTIVE", "false"),
                               "phase": claim.get("phase") if claim else "none",
+                              "interval_seconds": claim.get("interval_seconds") if claim else None,
                               "last_cycle_completed_at": claim.get("last_cycle_completed_at") if claim else None,
                               "last_cycle_errors": claim.get("last_cycle_errors") if claim else None}))
             return 0
@@ -380,6 +405,8 @@ def main():
             if args.resume_cloud:
                 monitor.recover()
                 return 0
+            if args.continue_local:
+                return monitor.continue_local()
             return monitor.start(args.once, args.handoff_only)
     except Exception as error:
         print(str(error) if isinstance(error, HandoffError) else f"本機交接未完成：{type(error).__name__}（私人細節省略）")
