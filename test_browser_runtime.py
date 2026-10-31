@@ -32,6 +32,16 @@ class BrowserRuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError):
                 browser.cloak_configuration()
 
+    def test_cloak_launch_preserves_other_readers_browser_lookup(self):
+        for original in (None, "existing-stock-browser-cache"):
+            environment = {} if original is None else {"PLAYWRIGHT_BROWSERS_PATH": original}
+            with tempfile.TemporaryDirectory() as temporary, patch.object(browser, "PROJECT", Path(temporary)), \
+                    patch.dict(os.environ, environment, clear=True), \
+                    patch.object(browser.importlib.util, "find_spec", return_value=object()), \
+                    patch.object(tempfile, "tempdir", None):
+                browser.configure_cloak_runtime()
+                self.assertEqual(os.environ.get("PLAYWRIGHT_BROWSERS_PATH"), original)
+
 
 if __name__ == "__main__":
     unittest.main()

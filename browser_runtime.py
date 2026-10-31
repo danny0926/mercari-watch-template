@@ -64,8 +64,10 @@ def configure_cloak_runtime():
     configuration = cloak_configuration(require_installed=True)
     environment = cloak_environment()
     for name in ("CLOAKBROWSER_CACHE_DIR", "CLOAKBROWSER_VERSION", "CLOAKBROWSER_AUTO_UPDATE",
-                 "CLOAKBROWSER_WIDEVINE", "TEMP", "TMP", "TMPDIR", "PLAYWRIGHT_BROWSERS_PATH"):
+                 "CLOAKBROWSER_WIDEVINE", "TEMP", "TMP", "TMPDIR"):
         os.environ[name] = environment[name]
+    # The other readers use stock Playwright browsers. Cloak passes its executable
+    # explicitly, so changing PLAYWRIGHT_BROWSERS_PATH would break the next Taiwan round.
     # tempfile may already have cached the OS temporary directory earlier in the round.
     tempfile.tempdir = str(configuration["temporary"])
     return configuration

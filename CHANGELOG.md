@@ -7,6 +7,7 @@
 - Add a project-only installer, contained browser/cache/profile/temp paths and browser-child credential filtering without redistributing browser binaries.
 - Add DOM regression coverage for both mixed-condition orders and verify native search, stock/order controls and public images through the same production reader.
 - Retain the existing explicit remote Edge reader for GitHub fallback after the hosted headless probe remained on a Cloudflare challenge; local monitoring stays headless.
+- Preserve the stock Playwright browser lookup between rounds so the headless integration does not change the Taiwan reader's executable path.
 
 ## 0.6.2
 
