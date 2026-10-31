@@ -19,8 +19,8 @@ python -m venv .venv
 # 啟用虛擬環境後：
 python -m pip install -r requirements.txt
 python -m playwright install chromium
-# 使用駿河屋且沒有安裝 Edge / Chrome 時：
-python -m patchright install chrome
+# 駿河屋主用無頭 CloakBrowser，套件與瀏覽器都只安裝到此專案：
+python setup-cloakbrowser.py
 ```
 
 將 `.env.example` 複製為 `.env`。環境變數優先於檔案；程式不會覆蓋已設定的變數。
@@ -32,7 +32,11 @@ python -m patchright install chrome
 | `DISCORD_WEBHOOK_URL_SECONDARY` | 可選的獨立 Discord 通道；只接收指定給它的條件 |
 | `DISCORD_WEBHOOK_URL_TERTIARY` | 可選的第三個獨立 Discord 通道；只接收指定給它的條件 |
 | `MERCARI_LINK_MODE` | `original`（預設，標題連到商品原站）或 `buyee`（明確選擇以 Buyee 代購頁作主連結） |
-| `SURUGAYA_BROWSER_CHANNEL` | 選用；Windows 預設 `msedge`、Linux 預設 `chrome`。駿河屋使用獨立的有頭瀏覽器，Linux 需桌面或 Xvfb |
+| `SURUGAYA_BROWSER_BACKEND` | `cloakbrowser`（預設，無頭主用）或 `patchright`（手動選用的有頭備援） |
+| `CLOAKBROWSER_CACHE_DIR` | 預設 `.state/cloakbrowser`，必須位於專案內；保存官方瀏覽器本體 |
+| `CLOAKBROWSER_VERSION` | 固定的免登入瀏覽器版本，預設 `146.0.7680.177.5`；自動更新停用 |
+| `SURUGAYA_BROWSER_PROFILE` | 選用；預設 `.state/browser-profiles/surugaya-cloakbrowser`，必須位於專案內 |
+| `SURUGAYA_BROWSER_CHANNEL` | 手動選擇 Patchright 時的 channel；Windows 預設 `msedge`、Linux 預設 `chrome` |
 | `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_USER_ID` | 使用 LINE 時須同時設定 |
 | `MONITOR_STATE_KEY` | Fernet 加密金鑰；正式保存紀錄必填 |
 | `MONITOR_STATE_PATH` | 加密紀錄位置，預設 `.state/seen.enc` |
@@ -123,11 +127,15 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 ## 駿河屋日本站
 
-`surugaya` 使用 [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) 與獨立瀏覽器 profile，已在本機與 GitHub Windows／Edge runner 驗證原生搜尋與公開商品圖片。一般 HTTP、普通無頭瀏覽器與本次 Linux runner 未取得可確認的搜尋頁；首頁能開啟不代表搜尋、排序、庫存與圖片皆可用。Check workflow 的 `surugaya_probe` 可獨立檢查 Windows runner，不讀私人條件或通知憑證；網站仍可能變更驗證要求。
+`surugaya` 主用 [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) 無頭模式及獨立 profile，不開啟可見網頁視窗。`setup-cloakbrowser.py` 將 Python 套件裝進專案 `.venv`，官方瀏覽器下載到 `.state/cloakbrowser/`，暫存檔使用 `.state/browser-tmp/`；不進行全域安裝，設定到專案外的路徑會被拒絕。瀏覽器子程序不繼承包含私人規則、通知憑證或加密金鑰的環境變數；搜尋詞仍會用在網站請求中。
 
-監聽「更新的商品」，不等同首次上市；只處理本次載入的搜尋頁。網站的「品切れ OFF」仍可能包含本店缺貨但其他賣家有貨的商品，因此程式另外確認本店新品／中古售價，略過第三方獨有商品與預約品。不將定價、運費門檻、手續費或第三方最低價當作本店售價。區間價標示「起」，不同分支品況與新品／中古使用不同 ID；它們仍需人工核對內容。限時特價從本店專用欄位讀取，驗證日本時間的活動期間並標明截止時間，不使用劃掉的原價；特價不改變去重 ID，也不因價格變動重新通知。未知或過期的特價版型仍回報來源失敗，保留既有紀錄。駿河屋錯誤紀錄包含固定原因代碼，不輸出私人搜尋詞或瀏覽器網址。
+目前固定 Python wrapper `0.6.4` 與免登入 Chromium `146.0.7680.177.5`，停用自動更新；不取得額外授權、不使用付費代理。wrapper 為 MIT，瀏覽器本體適用不同的 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，不隨本 repo 散布或上傳公開 Cache／Artifacts。目前專案整合不啟用帶 license key 的版本，因其額外儲存路徑與條件需要另行處理。需要維護性切換時，可明確設定 `SURUGAYA_BROWSER_BACKEND=patchright` 使用原本有頭方案；程式不會在無頭失敗時自動開視窗。
 
-圖片入口可能受驗證保護；只在商品需要通知時，沿網站實際圖片重新導向取得公開 CDN 網址，不猜圖片路徑。無法確認圖片時保留名稱與連結。瀏覽器 profile 保存在 `.state/surugaya-browser/`，包含瀏覽紀錄與網站 cookie，僅留本機，不提交或上傳 Actions Cache。雲端只保存原有加密去重檔；每次新 runner 都必須重新通過網站檢查。來源失敗不會變成零商品，也不建立假的基準；不保證永遠能通過驗證。不需模型 API、付費代理或解驗證服務。
+Check workflow 的 `surugaya_probe` 在獨立 Windows job 驗證通用 DOM 範例、原生搜尋與公開商品圖片，不讀私人條件或通知憑證。首頁能開啟不代表排序、庫存、價格與圖片皆可用；網站仍可能變更驗證要求。
+
+監聽「更新的商品」，不等同首次上市；只處理本次載入的搜尋頁。網站的「品切れ OFF」仍可能包含本店缺貨但其他賣家有貨的商品，因此程式另外確認本店新品／中古售價，略過第三方獨有商品與預約品。不將定價、運費門檻、手續費或第三方最低價當作本店售價。區間價標示「起」，不同分支品況與新品／中古使用不同 ID；它們仍需人工核對內容。限時特價從本店專用欄位讀取，即使同卡先列另一種品況的一般售價，仍分別配對各自的原價標籤、特價與活動期間。驗證日本時間並標明截止時間，不使用劃掉的原價；特價不改變去重 ID，也不因價格變動重新通知。未知或過期的特價版型仍回報來源失敗，保留既有紀錄。駿河屋錯誤紀錄包含固定原因代碼，不輸出私人搜尋詞或瀏覽器網址。
+
+圖片入口可能受驗證保護；只在商品需要通知時，沿網站實際圖片重新導向取得公開 CDN 網址，不猜圖片路徑。無法確認圖片時保留名稱與連結。瀏覽器 profile 包含瀏覽紀錄與網站 cookie，僅存專案內，不提交或上傳 Actions Cache。雲端只保存原有加密去重檔；每次新 runner 都必須下載官方瀏覽器並重新通過網站檢查。來源失敗不會變成零商品，也不建立假的基準；不保證永遠能通過驗證。不需模型 API、付費代理或解驗證服務。
 
 工作流程將 Mercari 日本站、台灣入口與 Yahoo!フリマ留在 Linux，駿河屋由獨立 Windows job 執行 `--source surugaya`。兩邊分別快取 `.state/seen.enc` 與 `.state/surugaya-seen.enc`，共用私人規則與加密金鑰，各自首次建立基準；既有 Mercari／Yahoo 去重紀錄不需重置，停用來源的歷史也保留。只執行指定來源時，程式不搜尋其他來源，也保留同一狀態檔中其他來源的紀錄與健康狀態。
 
@@ -181,7 +189,7 @@ Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
 .\.venv\Scripts\python.exe -u local_monitor.py --resume-cloud
 ```
 
-本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或直接關閉視窗可能無法交還雲端，本版本不會自動故障接手。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋使用互動式瀏覽器，本機須已登入 Windows 且能啟動 Edge／Chrome。
+本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或直接關閉視窗可能無法交還雲端，本版本不會自動故障接手。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋主用無頭瀏覽器；只有手動選擇 Patchright 備援時才需要可用的互動桌面。
 
 ## 資料與限制
 

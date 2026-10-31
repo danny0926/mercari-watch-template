@@ -37,6 +37,10 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
+        if: ${{ !inputs.surugaya_probe }}
+      - name: Install project-local browser for native probe
+        if: ${{ inputs.surugaya_probe }}
+        run: python setup-cloakbrowser.py
       - run: python -m unittest -q
         if: ${{ !inputs.surugaya_probe && !inputs.taiwan_probe && !inputs.taiwan_probe_private && !inputs.state_audit }}
       - name: Restore encrypted history for read-only audit
@@ -115,33 +119,5 @@ jobs:
               raise SystemExit(f'Taiwan probe failed ({type(error).__name__}); private details omitted') from None
       - name: Verify Japanese storefront access
         if: ${{ inputs.surugaya_probe }}
-        shell: python
-        run: |
-          import asyncio
-          import sys
-          from pathlib import Path
-          sys.path.insert(0, str(Path.cwd()))
-          from surugaya_source import SurugayaSearch
-          from market_sources import SourceUnavailable
-          async def probe():
-              async with SurugayaSearch() as source:
-                  try:
-                      items = await source.search('Nintendo Switch')
-                  except SourceUnavailable:
-                      if source.page:
-                          print('Browser page title:', (await source.page.title())[:100])
-                          print('Verification checkbox clicked:', source.challenge_clicked)
-                      raise
-                  if not items:
-                      raise RuntimeError('Expected public search results')
-                  await source.prepare_item(items[0])
-                  if not items[0].thumbnails:
-                      raise RuntimeError('Public product image was not confirmed')
-                  import httpx
-                  async with httpx.AsyncClient() as client:
-                      response = await client.get(items[0].thumbnails[0])
-                      if response.status_code != 200 or not response.headers.get('content-type', '').startswith('image/'):
-                          raise RuntimeError('Public product image was not accessible')
-                  print(f'Japanese storefront verified: {len(items)} direct offers')
-          asyncio.run(probe())
+        run: .\.venv\Scripts\python.exe browser_probe.py
 

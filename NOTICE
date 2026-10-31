@@ -10,7 +10,16 @@ Mercari, Discord, LINE, and GitHub names identify the services integrated by
 this independent project. Product content and images belong to their respective
 owners. No affiliation or endorsement is claimed.
 
-The Suruga-ya integration depends on Patchright Python (Apache-2.0):
+The optional headed Suruga-ya integration depends on Patchright Python (Apache-2.0):
 https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python
 The dependency's own license applies to its distribution; this fork's scoped
 MIT license does not relicense that dependency or third-party product content.
+
+The primary headless Suruga-ya integration uses CloakBrowser's Python wrapper
+(MIT): https://github.com/CloakHQ/CloakBrowser
+Its compiled Chromium binary is separately licensed by CloakHQ:
+https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md
+The wrapper's MIT license does not apply to that binary. This repository lists
+the dependency and downloads the binary from its official distributor for
+internal use; it does not redistribute, bundle, or upload the binary to public
+repository caches or artifacts. Browser profiles and binaries remain ignored.

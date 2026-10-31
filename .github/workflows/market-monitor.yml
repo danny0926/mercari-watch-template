@@ -93,13 +93,16 @@ jobs:
     timeout-minutes: 10
     env:
       PYTHONIOENCODING: utf-8
+      PIP_CACHE_DIR: ${{ github.workspace }}/.state/pip-cache
+      SURUGAYA_BROWSER_BACKEND: cloakbrowser
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      - name: Install project-local headless browser
+        run: python setup-cloakbrowser.py
       - name: Restore encrypted Japanese storefront state
         uses: actions/cache/restore@v4
         with:
@@ -118,7 +121,7 @@ jobs:
           WATCHLIST_JSON: ${{ secrets.WATCHLIST_JSON }}
           MONITOR_STATE_KEY: ${{ secrets.MONITOR_STATE_KEY }}
           MONITOR_STATE_PATH: .state/surugaya-seen.enc
-        run: python mercari_watch.py --once --source surugaya
+        run: .\.venv\Scripts\python.exe mercari_watch.py --once --source surugaya
       - name: Save encrypted Japanese storefront state
         if: ${{ always() && (steps.surugaya_monitor.outcome == 'success' || steps.surugaya_monitor.outcome == 'failure') && hashFiles('.state/surugaya-seen.enc') != '' }}
         uses: actions/cache/save@v4

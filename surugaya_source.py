@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from market_sources import SourceUnavailable
+from browser_runtime import browser_backend, configure_cloak_runtime, browser_child_environment
 
 HOST = "www.suruga-ya.jp"
 NEWEST = "modificationTime:descending"
@@ -32,6 +33,7 @@ class SurugayaUnavailable(SourceUnavailable):
         "direct-offer": "Direct offer was not confirmed",
         "browser-unavailable": "Browser is unavailable for this run",
         "browser-request": "Browser request failed",
+        "browser-config": "Browser configuration or project-local installation was not confirmed",
     }
 
     def __init__(self, code: str):
@@ -96,21 +98,27 @@ EXTRACT_SEARCH = r"""() => {
                 title: card.querySelector('.product-name')?.textContent.trim(),
                 image: card.querySelector('.photo_box img')?.src || '',
                 prices: paragraphs.map(text),
-                saleOffers: saleBlocks.map(block => {
-                    // Native sale cards put the condition label and current price
-                    // directly after this block. Nested marketplace prices are excluded.
-                    const normal = block.nextElementSibling;
-                    const current = normal?.nextElementSibling;
-                    return {
-                        condition: normal?.matches('p.price_normal') ? text(normal) : '',
-                        price: current?.matches('p.price_teika') ? text(current) : '',
-                        period: text(block.querySelector('.timesaleSpan')),
-                    };
+                saleOffers: saleBlocks.flatMap(block => {
+                    // A normal offer of the other condition can precede the sale.
+                    // Bind direct price pairs to their banner, stopping at the next banner.
+                    const period = text(block.querySelector('.timesaleSpan'));
+                    const offers = [];
+                    for (let normal = block.nextElementSibling; normal; normal = normal.nextElementSibling) {
+                        if (normal.matches('p.timesales')) break;
+                        if (!normal.matches('p.price_normal')) continue;
+                        const current = normal.nextElementSibling;
+                        offers.push({
+                            condition: text(normal),
+                            price: current?.matches('p.price_teika') ? text(current) : '',
+                            period,
+                        });
+                    }
+                    return offers.length ? offers : [{condition: '', price: '', period}];
                 }),
                 soldOut: paragraphs.some(p => /^品切れ\s*$/.test(p.textContent.trim())),
                 marketplace: !!price?.querySelector('.makeplaTit'),
                 reservation: /予約/.test(price?.textContent || ''),
-                timeSale: /タイムセール/.test(price?.textContent || ''),
+                timeSale: paragraphs.some(p => /タイムセール/.test(p.textContent)),
             };
         }),
     };
@@ -228,6 +236,7 @@ class SurugayaSearch:
         self.image_cache = {}
         self.unavailable = False
         self.challenge_clicked = False
+        self.timeout_error = TimeoutError
 
     async def __aenter__(self):
         return self
@@ -265,14 +274,25 @@ class SurugayaSearch:
                     await response.dispose()
         item.thumbnails = list(resolved)
 
-    async def search(self, keyword: str) -> list[SurugayaItem]:
-        if self.unavailable:
-            raise SurugayaUnavailable("browser-unavailable")
-        if keyword in self.cache:
-            return list(self.cache[keyword])
+    async def open_browser(self):
+        if self.context is not None:
+            return
         try:
-            if self.context is None:
-                from patchright.async_api import async_playwright
+            backend = browser_backend()
+            if backend == "cloakbrowser":
+                configuration = configure_cloak_runtime()
+                from cloakbrowser import launch_persistent_context_async
+                from playwright.async_api import TimeoutError as BrowserTimeout
+                profile = configuration["profile"]
+                self.context = await launch_persistent_context_async(
+                    str(profile), headless=True, humanize=True,
+                    browser_version=configuration["version"], env=browser_child_environment(),
+                    args=[f"--disk-cache-dir={profile / 'disk-cache'}",
+                          f"--crash-dumps-dir={configuration['temporary'] / 'crash-dumps'}",
+                          "--disable-breakpad", "--disable-crash-reporter"],
+                )
+            else:
+                from patchright.async_api import async_playwright, TimeoutError as BrowserTimeout
                 self.playwright = await async_playwright().start()
                 state = Path(os.environ.get("MONITOR_STATE_PATH", Path(__file__).parent / ".state/seen.enc"))
                 profile = state.parent / "surugaya-browser"
@@ -281,12 +301,22 @@ class SurugayaSearch:
                 self.context = await self.playwright.chromium.launch_persistent_context(
                     str(profile.resolve()), channel=channel, headless=False, no_viewport=True,
                 )
-                self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+            self.timeout_error = BrowserTimeout
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        except (ValueError, ModuleNotFoundError):
+            raise SurugayaUnavailable("browser-config") from None
+
+    async def search(self, keyword: str) -> list[SurugayaItem]:
+        if self.unavailable:
+            raise SurugayaUnavailable("browser-unavailable")
+        if keyword in self.cache:
+            return list(self.cache[keyword])
+        try:
+            await self.open_browser()
             await self.page.goto(surugaya_search_url(keyword), wait_until="domcontentloaded", timeout=30000)
-            from patchright.async_api import TimeoutError as BrowserTimeout
             try:
                 await self.page.locator('#search_header .hit').wait_for(timeout=10000)
-            except BrowserTimeout:
+            except self.timeout_error:
                 # Try the actual visible verification control once, unattended.
                 # Clicking it does not imply that the site has accepted the browser.
                 for frame in self.page.frames:

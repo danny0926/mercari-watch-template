@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- Make project-local, pinned CloakBrowser headless mode the primary Suruga-ya reader; keep headed Patchright as an explicit manual alternative.
+- Fix mixed regular and time-sale new/used offers by binding each direct price pair to its sale period, preserving condition identities and deadlines.
+- Add a project-only installer, contained browser/cache/profile/temp paths and browser-child credential filtering without redistributing browser binaries.
+- Add DOM regression coverage for both mixed-condition orders and verify native search, stock/order controls and public images through the same production reader.
+
 ## 0.6.2
 
 - Allow controlled local maintenance restarts to retain saved histories and cloud ownership without a cloud handback.

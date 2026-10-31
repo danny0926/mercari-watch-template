@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import mercari_watch as app
 from market_sources import SourceUnavailable
@@ -54,6 +54,41 @@ class SurugayaTests(unittest.TestCase):
         self.assertTrue(item.url.endswith("branch_number=0010"))
         self.assertIn("起價", item.price_note)
         self.assertEqual(app.price_label(app.to_record(item, {"id": "sample", "keyword": "example"})), "¥1,200 起")
+
+    def test_mixed_regular_new_and_sale_used_prices_remain_distinct(self):
+        sale = {"condition": "中古通常価格", "price": "￥900 税込",
+                "period": "2030-01-02 11:00:00 から2030-01-03 11:59:59 まで"}
+        raw = card(timeSale=True, saleOffers=[sale], prices=[
+            "新品：￥1,500 税込", "中古通常価格", "￥900 税込", "999円以上は送料無料", "定価：￥9,999",
+        ])
+        items = parse_surugaya_results(data([raw]), "example", now=datetime(2030, 1, 2, 12, tzinfo=JST))
+        self.assertEqual({item.id_: item.real_price for item in items}, {
+            "surugaya:EXAMPLE100:0000:new": 1500, "surugaya:EXAMPLE100:0000:used": 900,
+        })
+        self.assertEqual({item.id_.rsplit(":", 1)[-1] for item in items if "限時特價" in item.price_note}, {"used"})
+
+    def test_primary_browser_is_headless_and_excludes_notification_secrets(self):
+        from pathlib import Path
+        import os
+        import sys
+        context = SimpleNamespace(pages=[SimpleNamespace()], close=AsyncMock())
+        launch = AsyncMock(return_value=context)
+        configuration = {"profile": Path(".state/example-profile"), "temporary": Path(".state/example-tmp"),
+                         "version": "146.0.7680.177.5"}
+        async def check():
+            async with SurugayaSearch() as source:
+                await source.open_browser()
+                await source.open_browser()
+        with patch.dict(os.environ, {"SURUGAYA_BROWSER_BACKEND": "cloakbrowser", "WATCHLIST_JSON": "private-example",
+                                    "DISCORD_WEBHOOK_URL": "private-example", "MONITOR_STATE_KEY": "private-example"}), \
+                patch.dict(sys.modules, {"cloakbrowser": SimpleNamespace(launch_persistent_context_async=launch)}), \
+                patch("surugaya_source.configure_cloak_runtime", return_value=configuration):
+            asyncio.run(check())
+        launch.assert_awaited_once()
+        self.assertTrue(launch.call_args.kwargs["headless"])
+        for name in ("WATCHLIST_JSON", "DISCORD_WEBHOOK_URL", "MONITOR_STATE_KEY"):
+            self.assertNotIn(name, launch.call_args.kwargs["env"])
+        context.close.assert_awaited_once()
 
     def test_time_sale_uses_current_direct_price_and_retains_identity(self):
         now = datetime(2030, 1, 2, 12, tzinfo=JST)

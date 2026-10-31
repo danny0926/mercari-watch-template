@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 import mercari_watch as app
 from handoff_state import SLOTS, pack_states, read_state, split_payload, unpack_states, write_state
+from browser_runtime import browser_backend, cloak_configuration
 
 BASE = Path(__file__).resolve().parent
 ROOT = BASE / ".state/local-monitor"
@@ -150,6 +151,12 @@ class LocalMonitor:
             if not os.environ.get(route, "").strip() and not (route == app.DEFAULT_WEBHOOK_ENV and all(line)):
                 raise HandoffError("私人條件缺少通知目的地，不暫停雲端。")
         app.mercari_link_mode()
+        if any("surugaya" in watch.get("sources", ["jp"]) for watch in watches):
+            try:
+                if browser_backend() == "cloakbrowser":
+                    cloak_configuration(require_installed=True)
+            except ValueError:
+                raise HandoffError("請先在專案內執行 setup-cloakbrowser.py，並確認瀏覽器路徑與設定。") from None
         workflow = self.gh.json("api", f"repos/{self.gh.repository}/actions/workflows/monitor-handoff.yml")
         if workflow.get("state") != "active":
             raise HandoffError("請先將交接 workflow 部署到指定 repo 的 main 並啟用。")
@@ -291,7 +298,9 @@ class LocalMonitor:
         return True
 
     def run_local(self, once=False):
-        self.save(interval_seconds=self.interval, pid=os.getpid())
+        backend = browser_backend()
+        self.save(interval_seconds=self.interval, pid=os.getpid(),
+                  surugaya_browser=backend, surugaya_headless=backend == "cloakbrowser")
         print(f"本機已接手，每輪完成後等待 {self.interval} 秒。", flush=True)
         print("按 Ctrl+C 或使用 --stop，會完成當輪後交還雲端。", flush=True)
         errors = 0
@@ -382,6 +391,8 @@ def main():
                               "local_active": flags.get("LOCAL_MONITOR_ACTIVE", "false"),
                               "phase": claim.get("phase") if claim else "none",
                               "interval_seconds": claim.get("interval_seconds") if claim else None,
+                              "surugaya_browser": claim.get("surugaya_browser") if claim else None,
+                              "surugaya_headless": claim.get("surugaya_headless") if claim else None,
                               "last_cycle_completed_at": claim.get("last_cycle_completed_at") if claim else None,
                               "last_cycle_errors": claim.get("last_cycle_errors") if claim else None}))
             return 0
