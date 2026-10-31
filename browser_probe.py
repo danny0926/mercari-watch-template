@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 
-from surugaya_source import EXTRACT_SEARCH, JST, SurugayaSearch, parse_surugaya_results, surugaya_search_url
+from surugaya_source import EXTRACT_SEARCH, JST, SurugayaSearch, SurugayaUnavailable, parse_surugaya_results, surugaya_search_url
 
 
 async def verify_price_dom(source):
@@ -37,8 +37,14 @@ async def verify_price_dom(source):
 async def probe():
     async with SurugayaSearch() as source:
         await source.open_browser()
-        await verify_price_dom(source)
-        items = await source.search("Nintendo Switch")
+        # Verify production navigation before any request interception for DOM fixtures.
+        try:
+            items = await source.search("Nintendo Switch")
+        except SurugayaUnavailable:
+            print("Native probe page title:", (await source.page.title())[:100], flush=True)
+            print("Verification checkbox clicked:", source.challenge_clicked, flush=True)
+            print("Cloudflare frame present:", any("challenges.cloudflare.com" in frame.url for frame in source.page.frames), flush=True)
+            raise
         if not items:
             raise RuntimeError("Expected public native search results")
         await source.prepare_item(items[0])
@@ -49,6 +55,7 @@ async def probe():
             if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
                 raise RuntimeError("Public product image was not accessible")
         print(f"Native Japanese search verified: {len(items)} direct condition offers; public image verified")
+        await verify_price_dom(source)
 
 
 if __name__ == "__main__":
