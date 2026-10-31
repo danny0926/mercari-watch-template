@@ -6,6 +6,7 @@
 - Fix mixed regular and time-sale new/used offers by binding each direct price pair to its sale period, preserving condition identities and deadlines.
 - Add a project-only installer, contained browser/cache/profile/temp paths and browser-child credential filtering without redistributing browser binaries.
 - Add DOM regression coverage for both mixed-condition orders and verify native search, stock/order controls and public images through the same production reader.
+- Retain the existing explicit remote Edge reader for GitHub fallback after the hosted headless probe remained on a Cloudflare challenge; local monitoring stays headless.
 
 ## 0.6.2
 

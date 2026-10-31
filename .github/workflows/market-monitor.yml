@@ -94,15 +94,22 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       PIP_CACHE_DIR: ${{ github.workspace }}/.state/pip-cache
-      SURUGAYA_BROWSER_BACKEND: cloakbrowser
+      # Hosted headless CloakBrowser was blocked by the site's challenge.
+      # This explicit remote fallback never opens a window on the local computer.
+      SURUGAYA_BROWSER_BACKEND: patchright
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install project-local headless browser
-        run: python setup-cloakbrowser.py
+      - name: Install project-local remote reader
+        run: |
+          New-Item -ItemType Directory -Path .state/browser-tmp -Force | Out-Null
+          $env:TEMP = (Resolve-Path .state/browser-tmp).Path
+          $env:TMP = $env:TEMP
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip --isolated install --no-input --disable-pip-version-check --cache-dir .state/pip-cache -r requirements.txt
       - name: Restore encrypted Japanese storefront state
         uses: actions/cache/restore@v4
         with:

@@ -10,6 +10,11 @@ on:
         description: Verify the Japanese storefront from the runner, without private rules or notifications
         type: boolean
         default: false
+      surugaya_browser:
+        description: Browser for the optional native probe
+        type: choice
+        options: [cloakbrowser, patchright]
+        default: cloakbrowser
       taiwan_probe:
         description: Diagnose populated and empty Taiwan searches without notifications
         type: boolean
@@ -39,8 +44,16 @@ jobs:
       - run: pip install -r requirements.txt
         if: ${{ !inputs.surugaya_probe }}
       - name: Install project-local browser for native probe
-        if: ${{ inputs.surugaya_probe }}
+        if: ${{ inputs.surugaya_probe && inputs.surugaya_browser != 'patchright' }}
         run: python setup-cloakbrowser.py
+      - name: Install project-local remote fallback for native probe
+        if: ${{ inputs.surugaya_probe && inputs.surugaya_browser == 'patchright' }}
+        run: |
+          New-Item -ItemType Directory -Path .state/browser-tmp -Force | Out-Null
+          $env:TEMP = (Resolve-Path .state/browser-tmp).Path
+          $env:TMP = $env:TEMP
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip --isolated install --no-input --disable-pip-version-check --cache-dir .state/pip-cache -r requirements.txt
       - run: python -m unittest -q
         if: ${{ !inputs.surugaya_probe && !inputs.taiwan_probe && !inputs.taiwan_probe_private && !inputs.state_audit }}
       - name: Restore encrypted history for read-only audit
@@ -119,5 +132,7 @@ jobs:
               raise SystemExit(f'Taiwan probe failed ({type(error).__name__}); private details omitted') from None
       - name: Verify Japanese storefront access
         if: ${{ inputs.surugaya_probe }}
+        env:
+          SURUGAYA_BROWSER_BACKEND: ${{ inputs.surugaya_browser || 'cloakbrowser' }}
         run: .\.venv\Scripts\python.exe browser_probe.py
 
