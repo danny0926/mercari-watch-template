@@ -33,9 +33,10 @@ from mercapi.requests.search import SearchRequestData
 from market_sources import TaiwanSearch
 from yahoo_sources import YahooSearch
 from surugaya_source import SurugayaSearch, SurugayaUnavailable
+from surugaya_inventory import observe_inventory
 
 BASE = Path(__file__).parent
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 WATCHLIST = BASE / "watchlist.json"
 SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID
@@ -586,6 +587,8 @@ def load_watchlist() -> list[dict]:
                 re.compile(pattern)
         if not isinstance(w.get("review_unconfirmed", False), bool):
             raise ValueError("review_unconfirmed 須為布林值")
+        if not isinstance(w.get("notify_restock", False), bool):
+            raise ValueError("notify_restock 須為布林值")
         catchup_ids = w.get("catchup_ids", [])
         if not isinstance(catchup_ids, list) or len(catchup_ids) > 50 or any(
                 not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9:_-]+", identity) for identity in catchup_ids):
@@ -654,6 +657,8 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
     detail_cache = {}
     catchup_done = {route: set(values) for route, values in seen.get("_catchup_done_by_route", {}).items()}
     receipts = {route: dict(values) for route, values in seen.get("_notification_receipts", {}).items()}
+    stored_inventory = seen.get("_surugaya_inventory", {})
+    inventory = {route: dict(values) for route, values in stored_inventory.items()}
 
     async with (TaiwanSearch() as taiwan, YahooSearch("yahoo_fleamarket") as fleamarket,
                 SurugayaSearch() as surugaya):
@@ -693,8 +698,15 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 legacy_jp = route == DEFAULT_WEBHOOK_ENV and source == "jp" and wid in seen and "_baselines" not in seen
                 first_run = token not in baselines and not legacy_jp
                 identities = [item_identity(it) for it in items]
+                returned = set()
+                if source == "surugaya" and w.get("notify_restock", False):
+                    present, complete = surugaya.inventory_snapshot(source_watch["keywords"] or [w["keyword"]])
+                    route_inventory = inventory.setdefault(route, {})
+                    route_inventory[wid], returned = observe_inventory(
+                        route_inventory.get(wid), source_watch, identities, present, complete, limit=SEEN_KEEP)
                 count = sum(identity not in known for identity in identities)
                 print(f"{source} 本次 {len(items)} 筆符合，新品 {count} 筆"
+                      + (f"，重新販售 {len(returned)} 筆" if returned else "")
                       + ("（首次建立基準；僅指定補查項目可通知）" if first_run else ""))
                 if token not in baselines:
                     baselines.append(token)
@@ -706,15 +718,24 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                     identity = item_identity(it)
                     if identity in route_candidates:
                         route_candidates[identity] = merge_records(route_candidates[identity], to_record(it, w))
-                    elif identity in pending_catchup or (not first_run and identity not in known):
+                    elif identity in pending_catchup or identity in returned or (not first_run and identity not in known):
                         if source == "surugaya" and not dry_run:
                             await surugaya.prepare_item(it)
                         route_candidates[identity] = to_record(it, w)
                     if identity in pending_catchup and identity in route_candidates:
                         record = route_candidates[identity]
                         if record.get("notification_reason") != "catchup":
+                            if record.get("notification_reason") == "restock":
+                                record["name"] = record["name"].removeprefix("【重新販售】")
                             record["name"] = "【補查】" + record["name"]
                         record["notification_reason"] = "catchup"
+                    elif identity in returned and identity in route_candidates:
+                        record = route_candidates[identity]
+                        if record.get("notification_reason") not in ("catchup", "restock"):
+                            record["name"] = "【重新販售】" + record["name"]
+                            record["notification_reason"] = "restock"
+                            record["price_note"] = (record.get("price_note", "")
+                                                    + "；先前未在完整販售結果中出現，本輪重新出現，請核對商品頁庫存")
                     known.add(identity)
                 previous_ids = new_seen.get(wid, [])
                 fresh_ids = [identity for identity in identities if identity not in previous_ids]
@@ -737,6 +758,10 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
             for wid, identities in baseline_records.get(route, {}).items():
                 new_seen[wid] = list(dict.fromkeys(identities + seen.get(wid, [])))[:SEEN_KEEP]
             known_by_route[route] = baseline_known[route]
+            if route in stored_inventory:
+                inventory[route] = dict(stored_inventory[route])
+            else:
+                inventory.pop(route, None)
             errors += 1
         elif items:
             timestamp = datetime.now(timezone.utc).isoformat()
@@ -751,6 +776,8 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
     new_seen["_baselines"] = baselines
     new_seen["_catchup_done_by_route"] = {route: sorted(values) for route, values in catchup_done.items() if values}
     new_seen["_notification_receipts"] = {route: dict(sorted(values.items(), key=lambda entry: entry[1]["sent_at"])[-SEEN_KEEP:]) for route, values in receipts.items() if values}
+    if inventory:
+        new_seen["_surugaya_inventory"] = inventory
 
     # 健康狀態：全部搜尋都失敗才算一次失敗
     health = dict(seen.get(HEALTH_KEY, {"fails": 0, "alerted": False}))

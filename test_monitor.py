@@ -87,6 +87,7 @@ class MonitorTests(unittest.TestCase):
                       [watch(sources=["tw"], source_keywords={"tw": []})],
                       [watch(discord_webhook_env="GITHUB_TOKEN")],
                       [watch(discord_webhook_env="DISCORD_WEBHOOK_URL_bad")],
+                      [watch(notify_restock="true")],
                       [watch(id="_known_by_route")]]
         for values in bad_values:
             self.write_watches(values)
@@ -137,6 +138,65 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(self.run_check(), 0)
             send.assert_not_called()
         self.assertEqual(json.loads(self.seen_path.read_text())["sample"], ["one"])
+
+    def test_known_surugaya_offer_returning_to_sale_retries_delivery_then_stays_quiet(self):
+        identity = "surugaya:EXAMPLE100:0000:used"
+        listing = item(identity, source="surugaya", url="https://www.suruga-ya.jp/product/detail/EXAMPLE100")
+        self.write_watches([watch(sources=["surugaya"], price_max=None, notify_restock=True)])
+        self.seen_path.write_text(json.dumps({
+            "sample": [identity], "_known": [identity], "_baselines": ["sample:surugaya"],
+        }))
+        def missing():
+            state = json.loads(self.seen_path.read_text())
+            return state["_surugaya_inventory"][app.DEFAULT_WEBHOOK_ENV]["sample"]["offers"][identity]["missing"]
+        with patch.object(app, "Mercapi"), \
+                patch.object(app, "search_new", AsyncMock(return_value=[listing])) as search, \
+                patch.object(app.SurugayaSearch, "inventory_snapshot", return_value=(set(), True)) as snapshot, \
+                patch.object(app, "notify", side_effect=[False, True]) as send:
+            self.assertEqual(self.run_check(), 0)  # Migration seeds observed availability.
+            self.assertEqual(self.run_check(), 0)  # Same catalog ID is still available.
+            send.assert_not_called()
+            search.return_value = []
+            snapshot.return_value = ({identity}, True)  # Present but filtered out is not missing.
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 0)
+            snapshot.return_value = (set(), False)  # A partial page cannot confirm absence.
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 0)
+            snapshot.return_value = (set(), True)
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 1)
+            search.side_effect = SourceUnavailable("unavailable")
+            self.assertEqual(self.run_check(), 1)  # Failed searches leave observations unchanged.
+            self.assertEqual(missing(), 1)
+            search.side_effect = None
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 2)
+            search.return_value = [listing]
+            self.assertEqual(self.run_check(), 1)  # Failed delivery retains the pending return.
+            self.assertEqual(missing(), 2)
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 0)
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(send.call_count, 2)
+            for call in send.call_args_list:
+                record = call.args[0][0]
+                self.assertEqual(record["item_id"], identity)
+                self.assertEqual(record["notification_reason"], "restock")
+                self.assertTrue(record["name"].startswith("【重新販售】"))
+        state = json.loads(self.seen_path.read_text())
+        self.assertEqual(state["_notification_receipts"][app.DEFAULT_WEBHOOK_ENV][identity]["reason"], "restock")
+
+    def test_surugaya_changed_search_scope_does_not_invent_a_restock(self):
+        rule = watch(sources=["surugaya"], notify_restock=True)
+        first, _ = app.observe_inventory(None, rule, {"example"}, {"example"}, True)
+        first, _ = app.observe_inventory(first, rule, set(), set(), True)
+        first, _ = app.observe_inventory(first, rule, set(), set(), True)
+        changed, returned = app.observe_inventory(first, {**rule, "keywords": ["other"]},
+                                                  {"example"}, {"example"}, True)
+        self.assertFalse(returned)
+        self.assertEqual(changed["offers"]["example"]["missing"], 0)
+        self.assertEqual(first["offers"]["example"]["missing"], 2)
 
     def test_selected_source_preserves_other_source_history_and_health(self):
         self.write_watches([watch(sources=["jp", "surugaya"])])

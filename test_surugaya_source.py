@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import mercari_watch as app
 from market_sources import SourceUnavailable
-from surugaya_source import JST, NEWEST, SurugayaSearch, parse_surugaya_results, surugaya_search_url
+from surugaya_source import JST, NEWEST, SurugayaSearch, complete_search, parse_surugaya_results, surugaya_search_url
 
 
 def card(**changes):
@@ -24,6 +24,26 @@ def data(rows):
 
 
 class SurugayaTests(unittest.TestCase):
+    def test_only_complete_successful_query_coverage_can_confirm_absence(self):
+        full = data([card()])
+        partial = {**full, "hit": "該当件数:2件中 1-1件"}
+        empty = {**data([]), "hit": "該当件数:0件中 0-0件", "hasRoot": False}
+        self.assertTrue(complete_search(full))
+        self.assertEqual(parse_surugaya_results(empty, "example"), [])
+        self.assertTrue(complete_search(empty))
+        self.assertEqual(len(parse_surugaya_results(partial, "example")), 1)
+        self.assertFalse(complete_search(partial))
+        self.assertFalse(complete_search(data([card(reservation=True)])))
+        source = SurugayaSearch()
+        source.cache["one"] = parse_surugaya_results(full, "example")
+        source.complete_searches["one"] = True
+        present, complete = source.inventory_snapshot(["one", "two"])
+        self.assertEqual(present, {"surugaya:EXAMPLE100:0000:used"})
+        self.assertFalse(complete)
+        source.cache["two"] = []
+        source.complete_searches["two"] = True
+        self.assertTrue(source.inventory_snapshot(["one", "two"])[1])
+
     def test_latest_and_sold_out_exclusion_must_be_verified(self):
         self.assertIn("inStock=Off", surugaya_search_url("example"))
         for key, value in [("sort", "relavancy(int)"), ("stock", "On"),

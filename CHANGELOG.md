@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+- Add optional Suruga-ya return-to-sale notifications separately from stable catalog/condition identities.
+- Require two complete successful search absences before a matched offer can trigger a return notification; partial pages and failed searches cannot confirm absence.
+- Preserve observed inventory across encrypted local/cloud handoff, retry failed notifications, and seed changed or legacy search scopes without replaying old stock.
+- Document that observed returns cannot identify replenishment occurring entirely between polls or additional stock of an offer that remains available.
+
 ## 0.7.0
 
 - Make project-local, pinned CloakBrowser headless mode the primary Suruga-ya reader; keep headed Patchright as an explicit manual alternative.

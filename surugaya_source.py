@@ -12,6 +12,7 @@ from browser_runtime import browser_backend, configure_cloak_runtime, browser_ch
 HOST = "www.suruga-ya.jp"
 NEWEST = "modificationTime:descending"
 JST = timezone(timedelta(hours=9))
+RESULT_COUNT = r"該当件数[:：]\s*([\d,]+)件中\s*([\d,]+)\s*-\s*([\d,]+)件"
 
 
 class SurugayaUnavailable(SourceUnavailable):
@@ -167,7 +168,7 @@ def parse_surugaya_results(data: dict, keyword: str, *, now: datetime | None = N
             or params.get("search_word") != [keyword] or params.get("inStock") != ["Off"]
             or params.get("rankBy") != [NEWEST]):
         raise SurugayaUnavailable("search-url")
-    hit = re.fullmatch(r"該当件数[:：]\s*([\d,]+)件中\s*([\d,]+)\s*-\s*([\d,]+)件", data.get("hit") or "")
+    hit = re.fullmatch(RESULT_COUNT, data.get("hit") or "")
     if not hit or not isinstance(data.get("items"), list):
         raise SurugayaUnavailable("result-count")
     total, first, last = (int(value.replace(",", "")) for value in hit.groups())
@@ -225,6 +226,15 @@ def parse_surugaya_results(data: dict, keyword: str, *, now: datetime | None = N
     return list(unique.values())
 
 
+def complete_search(data: dict) -> bool:
+    """Use only a validated full result set as evidence that an offer is absent."""
+    hit = re.fullmatch(RESULT_COUNT, data.get("hit") or "")
+    if not hit or any(row.get("reservation") for row in data.get("items", [])):
+        return False
+    total, first, last = (int(value.replace(",", "")) for value in hit.groups())
+    return total == first == last == 0 or first == 1 and last == total
+
+
 class SurugayaSearch:
     """Reuse a dedicated browser profile; never use the user's personal profile."""
 
@@ -233,10 +243,17 @@ class SurugayaSearch:
         self.context = None
         self.page = None
         self.cache = {}
+        self.complete_searches = {}
         self.image_cache = {}
         self.unavailable = False
         self.challenge_clicked = False
         self.timeout_error = TimeoutError
+
+    def inventory_snapshot(self, keywords):
+        terms = list(dict.fromkeys(keywords))
+        identities = {item.id_ for term in terms for item in self.cache.get(term, [])}
+        complete = bool(terms) and all(self.complete_searches.get(term, False) for term in terms)
+        return identities, complete
 
     async def __aenter__(self):
         return self
@@ -333,8 +350,10 @@ class SurugayaSearch:
                     except Exception:
                         continue
                 await self.page.locator('#search_header .hit').wait_for(timeout=15000)
-            results = parse_surugaya_results(await self.page.evaluate(EXTRACT_SEARCH), keyword)
+            data = await self.page.evaluate(EXTRACT_SEARCH)
+            results = parse_surugaya_results(data, keyword)
             self.cache[keyword] = results
+            self.complete_searches[keyword] = complete_search(data)
             return list(results)
         except SourceUnavailable:
             raise
