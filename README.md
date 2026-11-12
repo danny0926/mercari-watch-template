@@ -128,7 +128,7 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 ## 台灣比價評估
 
-目前只有監聽、標題條件篩選與相同刊登 ID 去重，沒有實作跨市場商品配對、台灣價格擷取、圖片辨識或到手價計算。監聽不呼叫模型，不能據此推論收藏品比價可可靠地以零 token 完成。比價需要核對系列、版別、品況、數量與配件；圖文 AI 也須以真實案例驗證，資料不足時保留未知。現有測試未驗證跨市場配對品質；修正後的方案與實作狀態見 [比價評估](PRICE_COMPARISON.md)。
+目前保留監聽、文字條件篩選與相同刊登 ID 去重；另有下述選用的本機收藏圖片候選比對。尚未實作跨市場商品配對、台灣價格擷取或到手價計算。收藏比對使用本機模型，不呼叫付費模型 API；這不等於已驗證商品配對或比價品質。比價仍需核對系列、版別、品況、數量與配件，資料不足時保留未知；原有比價方案見 [比價評估](PRICE_COMPARISON.md)。
 
 ## 駿河屋日本站
 
@@ -220,6 +220,80 @@ Windows 瀏覽器啟動會先確認專案 Playwright 套件內的 Node 能執行
 原有 `--once`、`--handoff-only`、`--resume-cloud`、`--status`、`--continue-local` 等參數可經 `start-local.cmd` 直接交給 Python；它們不啟動 PM2。`--continue-local` 保留給確認舊程序已退出後的手動維護；PM2 正常 restart 則完整交回再接手。各模式互斥，復原前不可讓其他本機程序同時持有監聽權。
 
 本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或前景模式直接關閉視窗可能無法交還雲端；PM2 只重試可驗證的本機延續，不會讓雲端自動接管不明階段。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋主用無頭瀏覽器；只有手動選擇 Patchright 備援時才需要可用的互動桌面。
+
+## 私人本機收藏圖片比對（選用）
+
+每張 Discord 商品卡會增加「本機收藏圖片比對」欄位。預設 `COLLECTION_COMPARE_ENABLED=false` 顯示「未啟用」，不額外下載圖片或載入模型。啟用後，比對既有通知商品的賣場圖片與自己手動登錄的收藏照片；最多列出 **3 件不同收藏的視覺候選**。同件收藏的多張照片不占用多個名額。原來的賣場大圖、商品名稱、價格、連結與通知分流繼續保留；不建立空白候選圖、不增加堆疊的大型卡片，也不因收藏比對刪除任何既有通知。
+
+候選以 `1、2、3` 對應同張卡片右側的一張編號拼圖縮圖，使用真實收藏照片等比例縮放與留白，可在 Discord 點開查看。附件用官方 `payload_json` / `files[n]` multipart 格式發送，名稱僅為 `collection-1.jpg` 等通用名稱；多件商品分批時，每張卡片只引用自己的附件。Discord 各裝置的縮圖大小、裁切與點開行為仍由客戶端決定；本專案以離線請求驗證附件與卡片對應，沒有替使用者發送實際訊息驗證各裝置畫面。編號拼圖小圖可能不易直接辨認，請點開後核對。
+
+安裝一次（Python 3.12 以上，在本專案目錄）：
+
+```powershell
+python -B setup-collection.py
+$catalogPython = '.state/collection-runtime/venv/Scripts/python.exe'
+& $catalogPython -B collection_catalog.py init
+```
+
+Linux 的專用 Python 位於 `.state/collection-runtime/venv/bin/python`，其他參數相同。安裝器直接下載並核對 [Orchard Photos v0.5.0](https://github.com/chaseleantj/orchard-photos/releases/tag/v0.5.0) 的固定 commit 與來源 ZIP SHA-256；直接呼叫其原有 Scanner、Encoder 和 SemanticIndex。模型為 Google SigLIP 2 的固定 ONNX 匯出，第一次需下載約 **690 MB**；需要另外預留虛擬環境、pip 快取與索引空間。CPU 版不需要付費 API、API key 或雲端 AI，也不更改監聽用的 `.venv` / requirements。安裝失敗會停止並回報，修正網路或安裝環境後可再次執行同一指令。
+
+以檔案總管把自己擁有的 JPEG、PNG 或 WebP **靜態照片**手動複製到 `.state/collection/inbox/`。每張最多 6 MB、2 千萬像素；整個目錄最多 500 件收藏、1000 張照片。所有輸入路徑必須位於本專案 `.state` 內，不接受外部路徑或連到外部的 symlink/junction。以下都是非真實範例：
+
+```powershell
+# 第一張照片；id 自行指定且固定，name 是將顯示在 Discord 的收藏名稱。
+& $catalogPython -B collection_catalog.py add --id example-001 --name '範例收藏A' --photo '.state/collection/inbox/front.jpg'
+# 同一收藏追加另一角度；也可以在同一指令重複 --photo。
+& $catalogPython -B collection_catalog.py add --id example-001 --photo '.state/collection/inbox/back.png'
+# 改顯示名稱，不改私人 ID，也不需要重加照片。
+& $catalogPython -B collection_catalog.py add --id example-001 --name '範例收藏A（新版名稱）'
+# 移除第 1 張照片（依加入順序，移除後重新編號），或移除整件收藏。
+& $catalogPython -B collection_catalog.py remove --id example-001 --photo-number 1
+& $catalogPython -B collection_catalog.py remove --id example-001
+& $catalogPython -B collection_catalog.py status
+```
+
+也能先只用 `add --id example-002 --name '範例收藏B'` 建立零張照片的項目；加入第一張照片後才可參與比對。`add` 將照片**原始位元組完整複製**至私人 `originals/`，不重壓或剝除原檔 EXIF；匯入後可自行移除 inbox 的副本，日後請用上述指令增刪正式收藏。`remove` 會刪除選定正式原檔並更新目錄，請先自行備份要保留的照片。狀態指令只列數量，不在日誌列私人名稱或檔案路徑。
+
+最後在自己的 `.env` 設定：
+
+```dotenv
+COLLECTION_COMPARE_ENABLED=true
+COLLECTION_CATALOG_DIR=.state/collection
+```
+
+此設定不會新增、啟用或修改任何監聽規則與通知目的地；原本停用的模型／公仔規則仍停用。修改照片或收藏名稱後，下一次既有商品通知比對會重新掃描並更新索引，**不用手動重建索引或重啟監聽**。改環境設定本身仍須由原有服務載入新設定，部署由操作者處理。
+
+資料位置均被 `.gitignore` 的 `.state/` 排除：
+
+| 路徑 | 內容 |
+| --- | --- |
+| `.state/collection/catalog.json`、`originals/` | 私人 ID、顯示名稱及保留原始位元組的收藏照片 |
+| `.state/collection/inbox/` | 自己手動複製的待匯入照片；不會被自動當作收藏 |
+| `.state/collection/comparison.jpg` | 手動執行 compare 時產生的候選照片拼圖 |
+| `.state/collection-runtime/orchard/` | 原版 Orchard 固定來源與原 LICENSE |
+| `.state/collection-runtime/venv/`、`models/`、`indexes/` | 隔離套件、固定模型、每個收藏目錄獨立的索引和縮圖 |
+| `.state/collection-runtime/licenses/` | 原始／ONNX 模型卡與 Apache-2.0 授權全文 |
+| `.state/collection-runtime/tmp/`、`pip-cache/`、`home/`、`cache/` | 專用暫存、套件下載、HF/Xet 與其他套件的本機資料 |
+
+程序使用明確的專案內路徑，啟動子程序前重新設定 HOME、TEMP、HF/pip/XDG 快取，移除 Webhook、搜尋條件、登入 token 與外部套件路徑；掃描僅限已登錄的照片，不開啟 Orchard 桌面介面、HTTP API 或公開服務。原版 HTTP API 已檢查，其 `/api/search/image` 為本機圖片搜尋；本整合直接使用同一搜尋實作，省去開放本機服務的需要。每批最多 10 張賣場圖，子程序最多等待 120 秒，下載僅允許已知商品圖片 CDN 的 HTTPS 公開位址，不跟隨重新導向、不使用環境代理，限制下載時間、大小、格式與解碼像素；超出限制只回報無法比對。原始賣場圖片仍由既有卡片顯示。
+
+**收藏照片與候選名稱會依使用者的選擇，作為附件／欄位送到該商品原有的 Discord 通道。** 這是明確的對外分享，請確認通道成員可以看到它們。傳送的是去除 EXIF 的有界候選拼圖；不傳原檔路徑、原檔名或私人 ID，不建立公開圖片網址；本機原檔保持不變。不要把收藏、索引、日誌、模型目錄加入 Git、Artifacts 或 Actions Cache。既有加密去重／雲端交接不包含本機收藏。
+
+GitHub hosted runner 沒有你的本機收藏或模型，也不會自動下載它們；維持功能停用，或如實顯示未就緒。這個本機功能不會把收藏上傳雲端以補足缺失。沒有收藏照片顯示「未比對：本機收藏沒有照片」；賣場缺圖、圖片下載失敗、模型／套件缺失、收藏損壞或超時各顯示未比對／無法比對。部分收藏照片遺失或無法解碼時，若仍可找出候選會標示照片不完整；全部無法讀取則無法比對，不回報未收藏。
+
+排序使用 Orchard 的真實 SigLIP 2 cosine 相似度；保留上游圖片搜尋 `0.70` 的候選展示門檻，但**尚未以你的收藏校準**。分數不是機率，也不表示商品相同或已擁有。即使無候選，也只表示沒有可展示候選，不能斷言未收藏。相似背景、角色配色、包裝與不同版別可能互相誤排；同款不同角度也可能漏掉。程式不自動過濾任何通知。
+
+可先離線驗證自己的照片，不發 Discord 訊息、不讀監聽歷史：把同件收藏的另一個角度與一張不同物品照片放入 inbox，依序執行並在本機開啟 `comparison.jpg` 核對編號與私人 `catalog.json` 的名稱。終端只列候選序號和 cosine，避免把私人名稱寫入日誌；同款照片是否找對、不同照片是否誤排，都需要人工核對，不能以一次成功推估準確率。
+
+```powershell
+& $catalogPython -B collection_catalog.py compare --photo '.state/collection/inbox/another-angle.jpg'
+& $catalogPython -B collection_catalog.py compare --photo '.state/collection/inbox/different-object.png'
+# 最小離線檢查；不下載模型、不讀私人收藏、不送通知。
+.venv/Scripts/python.exe -B -m unittest -q test_monitor test_collection
+& $catalogPython -B -m unittest -q test_collection_catalog
+```
+
+來源與授權：[Orchard Photos（MIT）](https://github.com/chaseleantj/orchard-photos)、[Google SigLIP 2（Apache-2.0）](https://huggingface.co/google/siglip2-base-patch16-256)、[固定 ONNX 匯出](https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/tree/d1114256522a37ffa257a0a58017348ab0058db2)。ONNX 匯出模型卡指向 Google 原模型，未另列不同授權；沒有重新授權模型。完整來源與 MIT notice 見 [NOTICE](NOTICE)。已選 Orchard，因其可直接沿用原有掃描、持久化索引、固定模型與搜尋 API；沒有另建嵌入／排名模型，也未聲稱優於其他模型。備選 [rclip（MIT）](https://github.com/yurijmikhalevich/rclip) 此次未安裝，無須再引入第二套檢索與快取流程。
 
 ## 資料與限制
 

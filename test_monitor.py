@@ -424,7 +424,8 @@ class MonitorTests(unittest.TestCase):
         embed = app.build_discord_messages([record])[0]["embeds"][0]
         self.assertEqual(embed["image"]["url"], "https://example.com/item.jpg")
         self.assertIn("請核對配件", embed["description"])
-        self.assertEqual([field["value"] for field in embed["fields"]], ["¥700", "01/01 20:00", "2"])
+        self.assertEqual([field["value"] for field in embed["fields"][:3]], ["¥700", "01/01 20:00", "2"])
+        self.assertIn("未比對", embed["fields"][3]["value"])
 
     def test_discord_test_does_not_query_or_write_state(self):
         with patch.object(app, "Mercapi") as client, patch.object(app, "discord_push", return_value=True) as send:

@@ -34,9 +34,10 @@ from market_sources import TaiwanSearch
 from yahoo_sources import YahooSearch
 from surugaya_source import SurugayaSearch, SurugayaUnavailable
 from surugaya_inventory import observe_inventory
+from collection_compare import compare_items, comparison_text
 
 BASE = Path(__file__).parent
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 WATCHLIST = BASE / "watchlist.json"
 SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID
@@ -375,11 +376,20 @@ def discord_push(message: dict, webhook_env: str = DEFAULT_WEBHOOK_ENV) -> bool:
     if not webhook:
         print("（未設定 Discord Webhook）")
         return False
-    payload = {**message, "allowed_mentions": {"parse": []}}
+    # Internal attachment bytes are never JSON fields, paths, or file handles.
+    files = message.get("_collection_files", [])
+    payload = {key: value for key, value in message.items() if key != "_collection_files"}
+    payload["allowed_mentions"] = {"parse": []}
     for attempt in range(DISCORD_MAX_RETRIES + 1):
         try:
             url = httpx.URL(webhook).copy_set_param("wait", "true")
-            response = httpx.post(url, json=payload, timeout=20)
+            if files:
+                # Bytes can be replayed unchanged after 429; no exhausted streams.
+                response = httpx.post(url, data={"payload_json": json.dumps(payload, ensure_ascii=False)},
+                                      files=[(f"files[{i}]", (name, data, "image/jpeg"))
+                                             for i, (name, data) in enumerate(files)], timeout=20)
+            else:
+                response = httpx.post(url, json=payload, timeout=20)
         except (httpx.HTTPError, httpx.InvalidURL) as e:
             print(f"Discord 推播失敗：{type(e).__name__}", file=sys.stderr)
             return False
@@ -408,8 +418,22 @@ def discord_push(message: dict, webhook_env: str = DEFAULT_WEBHOOK_ENV) -> bool:
 
 def build_discord_messages(items: list[dict]) -> list[dict]:
     """商品卡片依 Discord 的 10 embeds / 6000 字元上限分批。"""
-    messages, embeds, characters = [], [], 0
-    for x in items:
+    messages, embeds, characters, attachments = [], [], 0, []
+    try:
+        comparisons = compare_items(items)
+        if len(comparisons) != len(items):
+            raise ValueError("Incomplete collection comparison")
+    except Exception:
+        comparisons = [{"state": "unavailable"} for _ in items]
+
+    def finish():
+        message = {"embeds": embeds}
+        if attachments:
+            message["_collection_files"] = list(attachments)
+            message["attachments"] = [{"id": i, "filename": name} for i, (name, _) in enumerate(attachments)]
+        messages.append(message)
+
+    for x, comparison in zip(items, comparisons):
         links = notification_links(x)
         labels = {**SOURCE_LABELS, "item": "查看商品", "buyee": "Buyee 代購入口（非原站）"}
         if str(x["item_id"]).startswith("shops:"):
@@ -454,15 +478,33 @@ def build_discord_messages(items: list[dict]) -> list[dict]:
                 embed["fields"].append({"name": "出價次數", "value": str(x["total_bid"]), "inline": True})
         if str(x.get("thumbnail") or "").startswith("https://"):
             embed["image"] = {"url": x["thumbnail"]}
+        embed["fields"].append({"name": "本機收藏圖片比對", "value": comparison_text(comparison), "inline": False})
         size = len(embed["title"]) + len(embed.get("description", ""))
         size += sum(len(field["name"]) + len(field["value"]) for field in embed["fields"])
+        # A single embed also shares the 6000-character budget. Keep all fields
+        # and source links; shorten only the existing descriptive prose as needed.
+        if size > 6000:
+            remove = size - 6000
+            description = embed.get("description", "")
+            prose, separator, links_tail = description.rpartition("\n\n")
+            if separator and len(prose) >= remove:
+                embed["description"] = prose[:len(prose) - remove] + separator + links_tail
+            else:
+                embed["description"] = description[:max(0, len(description) - remove)]
+            size = len(embed["title"]) + len(embed.get("description", ""))
+            size += sum(len(field["name"]) + len(field["value"]) for field in embed["fields"])
         if embeds and (len(embeds) == 10 or characters + size > 6000):
-            messages.append({"embeds": embeds})
-            embeds, characters = [], 0
+            finish()
+            embeds, characters, attachments = [], 0, []
+        if comparison.get("state") == "candidate" and comparison.get("evidence"):
+            # Unique within this message; never use private IDs or local filenames.
+            name = f"collection-{len(embeds) + 1}.jpg"
+            attachments.append((name, comparison["evidence"]))
+            embed["thumbnail"] = {"url": "attachment://" + name}
         embeds.append(embed)
         characters += size
     if embeds:
-        messages.append({"embeds": embeds})
+        finish()
     return messages
 
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+
+- Add an optional manual local-photo collection catalog with private identities, original-byte photo preservation, append/rename/delete commands, and automatic rescan on notification comparison.
+- Reuse pinned MIT Orchard Photos v0.5.0 Scanner, SigLIP 2 ONNX Encoder and SemanticIndex in a separate project-local environment; no cloud AI, keys, public image API, or monitor dependency changes.
+- Annotate every Discord product card truthfully; show up to three distinct visual candidates in a numbered, bounded thumbnail attachment while retaining the original seller image.
+- Send official multipart payload_json/files attachments with per-message card mapping, existing delivery retries and routing/dedup contracts; never automatically infer ownership or filter a notification.
+- Document local versus hosted fallback states, setup/storage boundaries, and offline validation with real photos; add focused offline multipart/catalog checks.
+
 ## 0.8.1
 
 - Recover Windows browser sources using a working project-packaged driver runtime and installed Edge when the matching Chromium browser is unavailable.

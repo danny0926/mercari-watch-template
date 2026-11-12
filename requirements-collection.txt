@@ -1,0 +1,8 @@
+# Isolated .state/collection-runtime/venv only; never install into the monitor.
+# Compatible subset of Orchard v0.5.0: no desktop UI, video, HEIF, or GPU packages.
+Pillow==12.3.0
+numpy==2.5.3
+onnxruntime==1.31.0
+tokenizers==0.23.3
+huggingface-hub==2.2.0
+httpx==0.28.1
