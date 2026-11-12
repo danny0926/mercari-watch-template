@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from market_sources import SourceUnavailable
-from browser_runtime import browser_backend, configure_cloak_runtime, browser_child_environment
+from browser_runtime import browser_backend, configure_browser_driver, configure_cloak_runtime, browser_child_environment
 
 HOST = "www.suruga-ya.jp"
 NEWEST = "modificationTime:descending"
@@ -35,6 +35,8 @@ class SurugayaUnavailable(SourceUnavailable):
         "browser-unavailable": "Browser is unavailable for this run",
         "browser-request": "Browser request failed",
         "browser-config": "Browser configuration or project-local installation was not confirmed",
+        "verification": "Human verification is required; no verification control was clicked",
+        "browser-timeout": "Search results did not become ready before the timeout",
     }
 
     def __init__(self, code: str):
@@ -246,7 +248,6 @@ class SurugayaSearch:
         self.complete_searches = {}
         self.image_cache = {}
         self.unavailable = False
-        self.challenge_clicked = False
         self.timeout_error = TimeoutError
 
     def inventory_snapshot(self, keywords):
@@ -295,6 +296,7 @@ class SurugayaSearch:
         if self.context is not None:
             return
         try:
+            configure_browser_driver()
             backend = browser_backend()
             if backend == "cloakbrowser":
                 configuration = configure_cloak_runtime()
@@ -334,22 +336,10 @@ class SurugayaSearch:
             try:
                 await self.page.locator('#search_header .hit').wait_for(timeout=10000)
             except self.timeout_error:
-                # Try the actual visible verification control once, unattended.
-                # Clicking it does not imply that the site has accepted the browser.
-                for frame in self.page.frames:
-                    if urlparse(frame.url).hostname != "challenges.cloudflare.com":
-                        continue
-                    try:
-                        checkbox = frame.get_by_role("checkbox")
-                        if not await checkbox.count():
-                            checkbox = frame.locator('input[type="checkbox"]')
-                        if await checkbox.count() and await checkbox.first.is_visible():
-                            await checkbox.first.click(timeout=3000)
-                            self.challenge_clicked = True
-                            break
-                    except Exception:
-                        continue
-                await self.page.locator('#search_header .hit').wait_for(timeout=15000)
+                self.unavailable = True
+                if any(urlparse(frame.url).hostname == "challenges.cloudflare.com" for frame in self.page.frames):
+                    raise SurugayaUnavailable("verification") from None
+                raise SurugayaUnavailable("browser-timeout") from None
             data = await self.page.evaluate(EXTRACT_SEARCH)
             results = parse_surugaya_results(data, keyword)
             self.cache[keyword] = results

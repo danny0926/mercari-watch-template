@@ -136,6 +136,8 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 目前固定 Python wrapper `0.6.4` 與免登入 Chromium `146.0.7680.177.5`，停用自動更新；不取得額外授權、不使用付費代理。wrapper 為 MIT，瀏覽器本體適用不同的 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，不隨本 repo 散布或上傳公開 Cache／Artifacts。目前專案整合不啟用帶 license key 的版本，因其額外儲存路徑與條件需要另行處理。需要維護性切換時，可明確設定 `SURUGAYA_BROWSER_BACKEND=patchright` 使用原本有頭方案；程式不會在無頭失敗時自動開視窗。
 
+網站要求人工驗證時，程式回報 `verification` 並停止當輪後續駿河屋查詢，不點擊或操作驗證控制；需由維護者另行處理。沒有驗證 frame 但結果逾時則回報 `browser-timeout`，兩者都不當成零商品。
+
 Check workflow 的 `surugaya_probe` 在獨立 Windows job 驗證通用 DOM 範例、原生搜尋與公開商品圖片，不讀私人條件或通知憑證。首頁能開啟不代表排序、庫存、價格與圖片皆可用；網站仍可能變更驗證要求。
 
 本機 CloakBrowser 無頭讀取已驗證可用；GitHub Windows runner 的相同無頭方案在本次驗證仍停留於 Cloudflare 驗證頁，因此雲端備援明確使用既有 Patchright／Edge，視窗只出現在遠端 runner。本機不會自動切換成有頭。`surugaya_probe` 的 `surugaya_browser` 可分別檢查兩種環境，避免把本機成功當成雲端也成功。
@@ -189,6 +191,8 @@ node .\pm2-local.cjs restart
 ```
 
 服務名稱固定為 `mercari-watch`，單一 Node supervisor 以 PM2 fork 模式啟動單一 Python worker；原有監聽迴圈、程序鎖與加密交接仍由 `local_monitor.py` 負責。同名服務若指向不同程式或工作目錄，控制程式會拒絕操作；所有控制只影響本服務，不會停止、重啟、刪除或儲存其他 PM2 應用。私人設定只放專案 `.env`，不放進 ecosystem 或 PM2 env 宣告；受管啟動以目前 `.env` 的值覆蓋 daemon 可能保留的同名舊設定。既有公仔暫停、補貨規則、監聽間隔與 Discord 分流名稱保持原樣。
+
+Windows 瀏覽器啟動會先確認專案 Playwright 套件內的 Node 能執行；若它損壞或崩潰，沿用專案已安裝的 Patchright Node，僅設定目前 Python 程序的 `PLAYWRIGHT_NODEJS_PATH`，不修改套件或 PM2 daemon。明確設定的 `PLAYWRIGHT_NODEJS_PATH` 保持原值。台灣來源優先使用匹配版本的 Playwright Chromium；其快取缺少時使用已安裝的 Edge 無頭模式及新建的暫存 profile，不下載瀏覽器、不使用使用者或駿河屋的 profile。兩個 runtime 都不可用、或沒有可用的 Edge 時仍回報失敗，需修復專案依賴或既有瀏覽器安裝。
 
 程式先設 `LOCAL_MONITOR_ACTIVE=true`、`MONITOR_ENABLED=false`，取消雲端計時器並等待正在執行的商品監聽完成。它不會中途取消來源工作；正常交接仍需等候 GitHub 排隊與 runner 啟動。`Monitor state handoff` 將兩個來源分組的紀錄加密後輸出為一天有效的 Artifacts，本機驗證金鑰與交接代號後才開始搜尋。若任一分組缺少或無法解密，不啟動本機監聽。CI 測試不受開關影響；持有本機監聽權時，手動啟動的雲端商品監聽也會略過。
 

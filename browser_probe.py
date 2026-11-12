@@ -42,7 +42,6 @@ async def probe():
             items = await source.search("Nintendo Switch")
         except SurugayaUnavailable:
             print("Native probe page title:", (await source.page.title())[:100], flush=True)
-            print("Verification checkbox clicked:", source.challenge_clicked, flush=True)
             print("Cloudflare frame present:", any("challenges.cloudflare.com" in frame.url for frame in source.page.frames), flush=True)
             raise
         if not items:

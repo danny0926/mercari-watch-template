@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import mercari_watch as app
 from market_sources import SourceUnavailable
-from surugaya_source import JST, NEWEST, SurugayaSearch, complete_search, parse_surugaya_results, surugaya_search_url
+from surugaya_source import JST, NEWEST, SurugayaSearch, SurugayaUnavailable, complete_search, parse_surugaya_results, surugaya_search_url
 
 
 def card(**changes):
@@ -24,6 +24,24 @@ def data(rows):
 
 
 class SurugayaTests(unittest.TestCase):
+    def test_verification_stops_this_run_without_clicking_or_repeating_queries(self):
+        source = SurugayaSearch()
+        source.context = object()
+        # Frames deliberately have no click/locator methods: verification is observed only.
+        source.page = SimpleNamespace(
+            goto=AsyncMock(), frames=[SimpleNamespace(url="https://challenges.cloudflare.com/example")],
+            locator=lambda _: SimpleNamespace(wait_for=AsyncMock(side_effect=TimeoutError())),
+        )
+        async def check():
+            with self.assertRaises(SurugayaUnavailable) as first:
+                await source.search("example")
+            self.assertEqual(first.exception.code, "verification")
+            with self.assertRaises(SurugayaUnavailable) as second:
+                await source.search("other")
+            self.assertEqual(second.exception.code, "browser-unavailable")
+        asyncio.run(check())
+        source.page.goto.assert_awaited_once()
+
     def test_only_complete_successful_query_coverage_can_confirm_absence(self):
         full = data([card()])
         partial = {**full, "hit": "該当件数:2件中 1-1件"}
@@ -102,6 +120,7 @@ class SurugayaTests(unittest.TestCase):
         with patch.dict(os.environ, {"SURUGAYA_BROWSER_BACKEND": "cloakbrowser", "WATCHLIST_JSON": "private-example",
                                     "DISCORD_WEBHOOK_URL": "private-example", "MONITOR_STATE_KEY": "private-example"}), \
                 patch.dict(sys.modules, {"cloakbrowser": SimpleNamespace(launch_persistent_context_async=launch)}), \
+                patch("surugaya_source.configure_browser_driver"), \
                 patch("surugaya_source.configure_cloak_runtime", return_value=configuration):
             asyncio.run(check())
         launch.assert_awaited_once()

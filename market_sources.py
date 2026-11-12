@@ -6,6 +6,8 @@ import sys
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlparse
 
+from browser_runtime import browser_child_environment, configure_browser_driver, stock_browser_channel
+
 
 class SourceUnavailable(RuntimeError):
     """A search could not be verified; this must not become an empty result."""
@@ -115,9 +117,13 @@ class TaiwanSearch:
 
     async def _search_once(self, keyword: str) -> list[TaiwanItem]:
         if self.browser is None:
+            configure_browser_driver()
             from playwright.async_api import async_playwright
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=True, channel="chromium")
+            self.browser = await self.playwright.chromium.launch(
+                headless=True, channel=stock_browser_channel(self.playwright.chromium),
+                env=browser_child_environment(),
+            )
         platform = "Windows NT 10.0; Win64; x64" if os.name == "nt" else "X11; Linux x86_64"
         agent = (f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) "
                  f"Chrome/{self.browser.version} Safari/537.36")

@@ -2,11 +2,52 @@
 import importlib.util
 import os
 import re
+import subprocess
+import sys
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent
 FREE_BROWSER_VERSION = "146.0.7680.177.5"
+
+
+@lru_cache(maxsize=1)
+def _windows_driver_runtime():
+    """Reuse a working packaged Node; some Windows Playwright builds crash at startup."""
+    for package in ("playwright", "patchright"):
+        spec = importlib.util.find_spec(package)
+        if spec is None or not spec.origin:
+            continue
+        node = Path(spec.origin).parent / "driver/node.exe"
+        if not node.is_file():
+            continue
+        try:
+            result = subprocess.run(
+                [str(node), "--version"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+                env=browser_child_environment(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and re.fullmatch(rb"v\d+\.\d+\.\d+\s*", result.stdout):
+                return str(node)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    raise ValueError("Project browser driver runtime is unavailable")
+
+
+def configure_browser_driver():
+    # Keep an explicitly selected runtime. The fallback stays in the installed
+    # project packages and changes neither their files nor the PM2 daemon env.
+    if sys.platform == "win32" and not os.environ.get("PLAYWRIGHT_NODEJS_PATH"):
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = _windows_driver_runtime()
+
+
+def stock_browser_channel(chromium):
+    # A virtualenv/package upgrade can leave no matching stock Chromium cache.
+    # Reuse installed Edge on Windows; never download or reuse a live profile.
+    if sys.platform == "win32" and not Path(chromium.executable_path).is_file():
+        return "msedge"
+    return "chromium"
 
 
 def browser_backend():

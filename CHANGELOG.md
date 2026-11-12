@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1
+
+- Recover Windows browser sources using a working project-packaged driver runtime and installed Edge when the matching Chromium browser is unavailable.
+- Stop on human verification without automatically interacting with the verification control.
+
 ## 0.8.0
 
 - Run the Windows local launcher as the single PM2-managed `mercari-watch` service using the existing PM2 installation; repeated start retains a healthy service and controls reject workspace/name collisions.
