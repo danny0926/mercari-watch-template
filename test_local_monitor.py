@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 import local_monitor as local
 from handoff_state import join_payload, read_state, unpack_states, write_state
@@ -163,6 +163,88 @@ class LocalMonitorTests(unittest.TestCase):
                 self.assertRaises(local.HandoffError):
             self.monitor.continue_local()
         run.assert_not_called()
+
+    def test_managed_start_selects_existing_routes_and_rejects_transfer_phases(self):
+        for phase, expected in ((None, "start"), ("cloud", "start"), ("local", "continue_local")):
+            with self.subTest(phase=phase), \
+                    patch.object(self.monitor, "previous", return_value={"phase": phase} if phase else None), \
+                    patch.object(self.monitor, "start", return_value=0) as start, \
+                    patch.object(self.monitor, "continue_local", return_value=0) as resume:
+                self.assertEqual(self.monitor.managed_local(), 0)
+                self.assertEqual(start.call_count, int(expected == "start"))
+                self.assertEqual(resume.call_count, int(expected == "continue_local"))
+        for phase in ("pausing", "exporting", "importing", "imported", "starting-cloud", "unknown"):
+            with self.subTest(phase=phase), patch.object(self.monitor, "previous", return_value={"phase": phase}), \
+                    patch.object(self.monitor, "start") as start, \
+                    patch.object(self.monitor, "continue_local") as resume, \
+                    self.assertRaisesRegex(local.HandoffError, "--resume-cloud"):
+                self.monitor.managed_local()
+            start.assert_not_called()
+            resume.assert_not_called()
+
+    def test_managed_marker_stop_after_source_error_hands_back_without_restart_exit(self):
+        self.run_local(handoff_only=True)
+        self.monitor.save(phase="local")
+        self.gh.values.update(MONITOR_ENABLED="false", LOCAL_MONITOR_ACTIVE="true")
+        self.gh.events.clear()
+        def failed_scan():
+            (self.monitor.root / "stop.request").touch()
+            return 1
+        with patch.object(self.monitor, "preflight"), patch.object(self.monitor, "cycle", failed_scan), \
+                patch.object(self.monitor, "transfer", self.transfer), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.monitor.managed_local(), 0)
+        self.assertEqual(self.monitor.previous()["phase"], "cloud")
+        self.assertEqual(self.monitor.previous()["last_cycle_errors"], 1)
+        self.assertNotIn(("transfer", "export"), self.gh.events)
+        self.assertEqual(self.gh.values["MONITOR_ENABLED"], "true")
+
+    def test_managed_continuation_keeps_encryption_and_ownership_checks(self):
+        self.run_local(handoff_only=True)
+        self.monitor.save(phase="local")
+        with patch.object(self.monitor, "preflight"), patch.object(self.monitor, "run_local") as run:
+            with self.assertRaises(local.HandoffError):
+                self.monitor.managed_local()  # Cloud flags still say cloud.
+            self.gh.values.update(MONITOR_ENABLED="false", LOCAL_MONITOR_ACTIVE="true")
+            write_state(self.monitor.paths()["core"], Fernet.generate_key().decode(), {})
+            with self.assertRaises(InvalidToken):
+                self.monitor.managed_local()  # Wrong key must not start a scan.
+            run.assert_not_called()
+
+    def test_managed_import_failure_still_requires_explicit_recovery(self):
+        self.run_local(handoff_only=True)
+        self.monitor.save(phase="local")
+        self.gh.values.update(MONITOR_ENABLED="false", LOCAL_MONITOR_ACTIVE="true")
+        self.fail_import = True
+        (self.monitor.root / "stop.request").touch()
+        with patch.object(self.monitor, "preflight"), patch.object(self.monitor, "transfer", self.transfer), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(local.HandoffError):
+            self.monitor.managed_local()
+        self.assertEqual(self.monitor.previous()["phase"], "importing")
+        self.assertEqual(self.gh.values["LOCAL_MONITOR_ACTIVE"], "true")
+
+    def test_cli_managed_route_is_under_existing_lock_and_errors_do_not_restart(self):
+        def managed():
+            self.assertFalse((self.monitor.root / "stop.request").exists())
+            with self.assertRaises(local.HandoffError):
+                with local.LocalLock(self.monitor.root / "launcher.lock"):
+                    self.fail("managed routing escaped LocalLock")
+            return 0
+        (self.monitor.root / "stop.request").touch()
+        with patch("sys.argv", ["local_monitor.py", "--managed-local"]), \
+                patch.object(local, "ROOT", self.monitor.root), patch.object(local, "load_dotenv"), \
+                patch.object(local, "GitHub", return_value=self.gh), \
+                patch.object(local, "LocalMonitor", return_value=self.monitor), \
+                patch.object(local.signal, "signal"), patch.object(self.monitor, "managed_local", side_effect=managed):
+            self.assertEqual(local.main(), 0)
+            with patch.object(self.monitor, "managed_local", side_effect=local.HandoffError("interrupted handback")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(local.main(), 78)
+
+    def test_managed_mode_is_mutually_exclusive_with_one_off_modes(self):
+        with patch("sys.argv", ["local_monitor.py", "--managed-local", "--once"]), \
+                contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            local.main()
+        self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":

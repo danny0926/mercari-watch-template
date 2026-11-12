@@ -329,6 +329,19 @@ class LocalMonitor:
         finally:
             self.restore()
 
+    def managed_local(self):
+        """Route PM2 startup under LocalLock using the existing ownership checks."""
+        previous = self.previous()
+        if previous and previous["phase"] == "local":
+            result = self.continue_local()
+        elif not previous or previous["phase"] == FINISHED:
+            result = self.start()
+        else:
+            raise HandoffError("前次交接中斷；不自動重啟，請先執行 python local_monitor.py --resume-cloud。")
+        # start/continue_local have already completed restore(). A requested
+        # stop is intentional even when the last scan reported source errors.
+        return 0 if self.stop_requested() else result
+
     def start(self, once=False, handoff_only=False):
         self.preflight()
         previous = self.previous()
@@ -370,7 +383,6 @@ class LocalMonitor:
 
 
 def main():
-    load_dotenv(BASE / ".env", override=False, interpolate=False)
     parser = argparse.ArgumentParser(description="本機監聽與 GitHub 雲端交接")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--once", action="store_true", help="執行一輪本機監聽後交回雲端")
@@ -379,7 +391,11 @@ def main():
     modes.add_argument("--status", action="store_true", help="唯讀查看雲端開關與本機交接階段")
     modes.add_argument("--stop", action="store_true", help="要求正在執行的本機監聽完成當輪後交還雲端")
     modes.add_argument("--continue-local", action="store_true", help="維護重啟後沿用已保存的本機紀錄，雲端保持停用")
+    modes.add_argument("--managed-local", action="store_true", help="PM2 專用：安全延續本機監聽或開始正常交接")
     args = parser.parse_args()
+    # A long-lived PM2 daemon may retain old shell settings. Managed launches
+    # take current private values from this project's .env instead.
+    load_dotenv(BASE / ".env", override=args.managed_local, interpolate=False)
     try:
         github = GitHub(os.environ.get("MONITOR_GITHUB_REPOSITORY", "").strip())
         monitor = LocalMonitor(github, os.environ.get("MONITOR_STATE_KEY", "").strip(),
@@ -418,11 +434,13 @@ def main():
                 return 0
             if args.continue_local:
                 return monitor.continue_local()
+            if args.managed_local:
+                return monitor.managed_local()
             return monitor.start(args.once, args.handoff_only)
     except Exception as error:
         print(str(error) if isinstance(error, HandoffError) else f"本機交接未完成：{type(error).__name__}（私人細節省略）")
         print("若雲端尚未恢復，請在同一電腦執行：python local_monitor.py --resume-cloud")
-        return 1
+        return 78 if args.managed_local else 1
 
 
 if __name__ == "__main__":

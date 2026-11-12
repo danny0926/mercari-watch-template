@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+
+- Run the Windows local launcher as the single PM2-managed `mercari-watch` service using the existing PM2 installation; repeated start retains a healthy service and controls reject workspace/name collisions.
+- Preserve the existing Python lock, stop marker, encrypted histories and cloud handoff; PM2 shutdown IPC keeps requesting a graceful stop through startup races and waits up to 30 minutes for the active scan and handback.
+- Add managed startup routing through verified local continuation or normal cloud takeover; interrupted transfers and failed handbacks stop for explicit recovery instead of silently restarting.
+- Treat user-requested stops as intentional even after source errors, bound unstable startup retries with PM2 backoff, and make restart wait for confirmed clean handback.
+- Keep private settings in project `.env`, store logs under ignored `.state/pm2`, retain standalone diagnostic/one-off modes, and document that `pm2 save` alone does not install Windows boot startup.
+
 ## 0.7.1
 
 - Add optional Suruga-ya return-to-sale notifications separately from stable catalog/condition identities.

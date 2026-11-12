@@ -1,2 +1,5 @@
 @echo off
-call "%~dp0start-local.cmd" --stop
+setlocal
+cd /d "%~dp0"
+node "%~dp0pm2-local.cjs" stop
+exit /b %errorlevel%

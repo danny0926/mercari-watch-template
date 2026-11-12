@@ -36,7 +36,7 @@ from surugaya_source import SurugayaSearch, SurugayaUnavailable
 from surugaya_inventory import observe_inventory
 
 BASE = Path(__file__).parent
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 WATCHLIST = BASE / "watchlist.json"
 SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID

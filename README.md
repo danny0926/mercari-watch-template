@@ -171,21 +171,38 @@ Discord Webhook 基本功能不需 Nitro。公開專案使用標準 GitHub-hoste
 
 先將程式與 `monitor-handoff.yml` 部署到自己 repo 的 `main`，完成上節雲端設定，安裝 [GitHub CLI](https://cli.github.com/)，執行 `gh auth login`。本機帳號須能讀取 Actions／Artifacts、啟動與取消 workflows、寫入 repo Variables 與 Secrets。沿用已登入的帳號即可，不將 GitHub token 寫入公開檔案。`.env` 另填 `MONITOR_GITHUB_REPOSITORY=owner/repo`，搜尋條件、通知憑證與 `MONITOR_STATE_KEY` 須與雲端一致。
 
-Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
+Windows 本機常駐需要已安裝的 Node.js、PM2 與專案 `.venv`；控制程式會沿 Node 模組搜尋路徑、PATH 與 `%APPDATA%\npm` 找到現有 PM2，不會自動安裝。可雙擊 `start-local.cmd`，或在專案目錄執行：
 
 ```powershell
-.\.venv\Scripts\python.exe -u local_monitor.py
+# 啟動背景服務後立即返回；重複啟動不重啟健康的程序
+.\start-local.cmd
+# PM2 程序狀態（不輸出私人環境變數）
+node .\pm2-local.cjs status
+# 監聽權、實際間隔與最近一輪結果
+.\start-local.cmd --status
+# 查看本服務的輸出；Ctrl+C 只離開日誌查看
+pm2 logs mercari-watch --lines 50
+# 完成當輪與交接後停止；start-local.cmd --stop 也走相同流程
+.\stop-local.cmd
+# 完成交接後才重新啟動、接回本機監聽權
+node .\pm2-local.cjs restart
 ```
+
+服務名稱固定為 `mercari-watch`，單一 Node supervisor 以 PM2 fork 模式啟動單一 Python worker；原有監聽迴圈、程序鎖與加密交接仍由 `local_monitor.py` 負責。同名服務若指向不同程式或工作目錄，控制程式會拒絕操作；所有控制只影響本服務，不會停止、重啟、刪除或儲存其他 PM2 應用。私人設定只放專案 `.env`，不放進 ecosystem 或 PM2 env 宣告；受管啟動以目前 `.env` 的值覆蓋 daemon 可能保留的同名舊設定。既有公仔暫停、補貨規則、監聽間隔與 Discord 分流名稱保持原樣。
 
 程式先設 `LOCAL_MONITOR_ACTIVE=true`、`MONITOR_ENABLED=false`，取消雲端計時器並等待正在執行的商品監聽完成。它不會中途取消來源工作；正常交接仍需等候 GitHub 排隊與 runner 啟動。`Monitor state handoff` 將兩個來源分組的紀錄加密後輸出為一天有效的 Artifacts，本機驗證金鑰與交接代號後才開始搜尋。若任一分組缺少或無法解密，不啟動本機監聽。CI 測試不受開關影響；持有本機監聽權時，手動啟動的雲端商品監聽也會略過。
 
-**停止時按一次 Ctrl+C，等候「交接完成」後再關閉視窗。** 程式會完成當輪，將兩份紀錄壓縮後再以既有金鑰加密，經專用 Secrets 傳給 import workflow。兩個分組都成功存入原本的 Cache 後，才解除本機監聽權並恢復雲端計時。暫存 Secrets 隨後刪除；公開輸入僅包含隨機交接代號，不包含商品編號、搜尋條件或憑證。此流程有傳輸大小上限，超限時保留紀錄並停止交接。
+**停止或重啟請使用上述控制命令，等候「交接完成」。** PM2 透過 Windows shutdown IPC 通知 supervisor；它持續保留既有 `stop.request`，涵蓋 Python 啟動時清除舊標記的競爭情況，並等待 Python 自行退出，不自行終止子程序。程式會完成當輪，將兩份紀錄壓縮後再以既有金鑰加密，經專用 Secrets 傳給 import workflow。兩個分組都成功存入原本的 Cache 後，才解除本機監聽權並恢復雲端計時。暫存 Secrets 隨後刪除；公開輸入僅包含隨機交接代號，不包含商品編號、搜尋條件或憑證。此流程有傳輸大小上限，超限時保留紀錄並停止交接。PM2 等待上限為 30 分鐘，供當輪搜尋及原有最長 900 秒的 transfer 等待使用；若超時遭 PM2 強制結束，需先確認程序已退出，再走下述人工復原。
 
-若本機監聽在背景執行，可雙擊 `stop-local.cmd` 或執行 `python local_monitor.py --stop`，要求完成當輪後交還雲端。`--status` 會顯示最近一輪完成時間與來源錯誤數，方便確認本機是否已實際執行搜尋。
+也可執行 `python local_monitor.py --stop`，透過原有標記要求完成當輪後交還雲端。受管程序即使最後一輪有來源錯誤，主動停止完成交接後仍以正常停止結束，不會自動重啟。`--status` 會顯示最近一輪完成時間與來源錯誤數，方便確認本機是否已實際執行搜尋；PM2 顯示 online 僅代表 supervisor 正在執行，仍須透過日誌與本機狀態確認交接及搜尋已就緒。
 
-等待時間從 `.env` 的 `LOCAL_MONITOR_INTERVAL_SECONDS` 讀取，`--status` 顯示程序實際採用的秒數。這是每輪完成後的等待時間；搜尋耗時另外計算，且不會重疊執行。變更設定需重啟程序。維護重啟可在確認上一輪已保存、舊程序已停止後使用 `--continue-local`，沿用同一份本機紀錄並維持雲端停用；它仍會驗證監聽權、程序鎖與加密紀錄。
+等待時間從 `.env` 的 `LOCAL_MONITOR_INTERVAL_SECONDS` 讀取，`--status` 顯示程序實際採用的秒數。這是每輪完成後的等待時間；搜尋耗時另外計算，且不會重疊執行。變更設定需使用上述 restart 命令，先完整交回雲端再重新接手。PM2 因意外子程序失敗重試時，`--managed-local` 只在既有紀錄為 `local` 時呼叫原有 `continue_local()`，核對雲端仍暫停、程序鎖與兩份加密歷史；沒有紀錄或已完成 `cloud` 則走正常啟動。交接中的其他階段、驗證失敗或交回失敗以復原代碼 78 停止，不自動重啟；請確認舊程序已退出後執行 `--resume-cloud`，再重新 start。控制程式的 restart 會比對該次 supervisor 的完成紀錄，無法確認正常交接時停止，不直接啟動新一代；不單憑 PM2 可能尚未更新的退出代碼判斷成功。
+
+意外子程序失敗交由 PM2 做有限啟動重試：延遲由 3 秒逐步增加、最高 15 秒，`min_uptime=10m`、`max_restarts=5` 限制啟動期的不穩定失敗；長時間穩定執行後的失敗不算同一啟動失敗批次。正常停止 0 與需復原 78 均列在 `stop_exit_codes`，不自動重啟。日誌位於忽略的 `.state/pm2/out.log` 與 `error.log`；日誌沒有配置自動輪替，需留意磁碟空間。`pm2 save` 只保存 PM2 程序清單，**不會安裝 Windows 開機啟動**，也可能保存其他服務與環境資料；本專案控制命令不自動 save 或配置系統啟動。
 
 ```powershell
+# 原有前景模式仍可使用；停止時按一次 Ctrl+C，等交接完成
+.\.venv\Scripts\python.exe -X utf8 -u local_monitor.py
 # 查看狀態，不切換監聽
 .\.venv\Scripts\python.exe local_monitor.py --status
 # 完整交接一次，但不搜尋、不發商品通知
@@ -196,7 +213,9 @@ Windows 可雙擊 `start-local.cmd`，或在專案目錄執行：
 .\.venv\Scripts\python.exe -u local_monitor.py --resume-cloud
 ```
 
-本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或直接關閉視窗可能無法交還雲端，本版本不會自動故障接手。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋主用無頭瀏覽器；只有手動選擇 Patchright 備援時才需要可用的互動桌面。
+原有 `--once`、`--handoff-only`、`--resume-cloud`、`--status`、`--continue-local` 等參數可經 `start-local.cmd` 直接交給 Python；它們不啟動 PM2。`--continue-local` 保留給確認舊程序已退出後的手動維護；PM2 正常 restart 則完整交回再接手。各模式互斥，復原前不可讓其他本機程序同時持有監聽權。
+
+本機紀錄與交接進度保存在忽略的 `.state/local-monitor/`。不要清除它們來解除暫停；應先執行 `--resume-cloud`。突然斷電、強制結束或前景模式直接關閉視窗可能無法交還雲端；PM2 只重試可驗證的本機延續，不會讓雲端自動接管不明階段。發送通知與保存紀錄之間若意外中斷，仍可能重送少量訊息。駿河屋主用無頭瀏覽器；只有手動選擇 Patchright 備援時才需要可用的互動桌面。
 
 ## 資料與限制
 
