@@ -31,6 +31,7 @@ python setup-cloakbrowser.py
 | `DISCORD_WEBHOOK_URL` | Discord incoming Webhook 網址；使用 Discord 時設定 |
 | `DISCORD_WEBHOOK_URL_SECONDARY` | 可選的獨立 Discord 通道；只接收指定給它的條件 |
 | `DISCORD_WEBHOOK_URL_TERTIARY` | 可選的第三個獨立 Discord 通道；只接收指定給它的條件 |
+| `DISCORD_WEBHOOK_URL_QUATERNARY` | 可選的第四個獨立 Discord 通道；只接收指定給它的條件 |
 | `MERCARI_LINK_MODE` | `original`（預設，標題連到商品原站）或 `buyee`（明確選擇以 Buyee 代購頁作主連結） |
 | `SURUGAYA_BROWSER_BACKEND` | `cloakbrowser`（預設，無頭主用）或 `patchright`（手動選用的有頭備援） |
 | `CLOAKBROWSER_CACHE_DIR` | 預設 `.state/cloakbrowser`，必須位於專案內；保存官方瀏覽器本體 |
@@ -87,7 +88,7 @@ WATCHLIST_JSON='[{"id":"watch-1","name":"商品A","keyword":"範例商品","keyw
 
 自訂 Discord 目的地不會轉送到預設 Discord 或 LINE。目的地未設定時回報失敗，不會改送其他頻道。原有單通道去重紀錄會延續到預設通道，新通道首次建立自己的基準；同件商品若符合不同通道條件，可在各通道各收到一次。
 
-第三個目的地使用 `DISCORD_WEBHOOK_URL_TERTIARY`，並在私人條件的 `discord_webhook_env` 指定同名變數；雲端來源工作、連線測試與計時異常警告均會讀取這個可選目的地。實際分流條件與通道憑證僅放在 `.env`／Secrets。
+第三、第四個目的地分別使用 `DISCORD_WEBHOOK_URL_TERTIARY`、`DISCORD_WEBHOOK_URL_QUATERNARY`，並在私人條件的 `discord_webhook_env` 指定同名變數；雲端來源工作、連線測試與計時異常警告均會讀取這些可選目的地。實際分流條件與通道憑證僅放在 `.env`／Secrets。
 
 ```sh
 python mercari_watch.py --once --dry-run
