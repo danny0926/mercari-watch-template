@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Preserve and notify successful keyword results when other keywords fail, while reporting partial source failures and requiring complete results for new baselines and stock-absence observations.
+
 ## 0.9.0
 
 - Add an optional manual local-photo collection catalog with private identities, original-byte photo preservation, append/rename/delete commands, and automatic rescan on notification comparison.

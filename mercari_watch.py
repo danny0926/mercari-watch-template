@@ -147,46 +147,78 @@ async def extended_match(it, w: dict, m: Mercapi, cache: dict) -> bool:
     return True
 
 
+class PartialSearchError(Exception):
+    """部分搜尋詞失敗；items 只含成功搜尋詞的結果。
+
+    呼叫端可通知其中的新品，但不可當成完整觀察（新規則基準、駿河屋缺貨判斷）。
+    """
+
+    def __init__(self, items: list, failures: list, attempted: int):
+        super().__init__(f"{len(failures)} of {attempted} keyword searches failed")
+        self.items = items
+        self.failures = failures
+        self.attempted = attempted
+
+
+def failure_detail(error: Exception) -> str:
+    """只輸出例外類型與預先定義的代碼，不含私人搜尋詞或回應內容。"""
+    if isinstance(error, SurugayaUnavailable):
+        return f"{type(error).__name__} [{error.code}] {error.public_reason}"
+    return type(error).__name__
+
+
 async def search_new(m: Mercapi, w: dict, taiwan=None, external=None, detail_cache=None):
-    # 同一商品的不同叫法分開搜尋；全部成功才保存這組的已看紀錄。
+    # 同一商品的不同叫法分開搜尋；單一搜尋詞失敗不中斷其餘搜尋詞。
+    # 全部失敗時拋出第一個錯誤；部分失敗以 PartialSearchError 帶回成功部分。
     keywords = list(dict.fromkeys(w.get("keywords") or [w["keyword"]]))
-    found = {}
+    source = w.get("source", "jp")
+    if source not in SOURCE_LABELS:
+        raise ValueError("Unsupported search source")
+    found, failures = {}, []
     detail_cache = {} if detail_cache is None else detail_cache
     for index, keyword in enumerate(keywords):
         if index:
             await asyncio.sleep(DELAY_BETWEEN)
-        source = w.get("source", "jp")
-        if source not in SOURCE_LABELS:
-            raise ValueError("Unsupported search source")
-        if source in ("yahoo_fleamarket", "surugaya"):
-            if external is None:
-                async with (SurugayaSearch() if source == "surugaya" else YahooSearch(source)) as client:
-                    items = await client.search(keyword)
+        matched = {}
+        try:
+            if source in ("yahoo_fleamarket", "surugaya"):
+                if external is None:
+                    async with (SurugayaSearch() if source == "surugaya" else YahooSearch(source)) as client:
+                        items = await client.search(keyword)
+                else:
+                    items = await external[source].search(keyword)
+            elif source == "tw":
+                if taiwan is None:
+                    async with TaiwanSearch() as client:
+                        items = await client.search(keyword)
+                else:
+                    items = await taiwan.search(keyword)
             else:
-                items = await external[source].search(keyword)
-        elif source == "tw":
-            if taiwan is None:
-                async with TaiwanSearch() as client:
-                    items = await client.search(keyword)
-            else:
-                items = await taiwan.search(keyword)
-        else:
-            res = await m.search(
-                keyword,
-                exclude=w.get("exclude") or None,
-                price_min=w.get("price_min"),
-                price_max=w.get("price_max"),
-                categories=w.get("category_ids", []),
-                item_conditions=w.get("item_conditions", []),
-                sort_by=SearchRequestData.SortBy.SORT_CREATED_TIME,
-                sort_order=SearchRequestData.SortOrder.ORDER_DESC,
-                status=[SearchRequestData.Status.STATUS_ON_SALE],
-            )
-            items = res.items
-        print(f"搜尋回傳 {len(items)} 筆")
-        for it in items:
-            if passes_filters(it, w) and await extended_match(it, w, m, detail_cache):
-                found[item_identity(it)] = it
+                res = await m.search(
+                    keyword,
+                    exclude=w.get("exclude") or None,
+                    price_min=w.get("price_min"),
+                    price_max=w.get("price_max"),
+                    categories=w.get("category_ids", []),
+                    item_conditions=w.get("item_conditions", []),
+                    sort_by=SearchRequestData.SortBy.SORT_CREATED_TIME,
+                    sort_order=SearchRequestData.SortOrder.ORDER_DESC,
+                    status=[SearchRequestData.Status.STATUS_ON_SALE],
+                )
+                items = res.items
+            print(f"搜尋回傳 {len(items)} 筆")
+            for it in items:
+                if passes_filters(it, w) and await extended_match(it, w, m, detail_cache):
+                    matched[item_identity(it)] = it
+        except Exception as error:
+            # 失敗的搜尋詞不提供任何結果；下一輪會重新搜尋。
+            failures.append(error)
+            continue
+        found.update(matched)
+    if failures and len(failures) == len(keywords):
+        raise failures[0]
+    if failures:
+        raise PartialSearchError(list(found.values()), failures, len(keywords))
     return list(found.values())
 
 
@@ -724,16 +756,22 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                     source_outcomes.setdefault((route, source), []).append(False)
                     print("tw 搜尋失敗：台灣來源請使用不限價條件", file=sys.stderr)
                     continue
+                partial = None
                 try:
                     items = await search_new(m, source_watch, taiwan, external, detail_cache=detail_cache)
-                    searched += 1
-                    source_outcomes.setdefault((route, source), []).append(True)
+                except PartialSearchError as e:
+                    # 成功搜尋詞的新品照常通知；失敗仍計入來源健康與結束代碼。
+                    items, partial = e.items, e
+                    errors += 1
+                    reasons = "、".join(dict.fromkeys(failure_detail(error) for error in e.failures))
+                    print(f"{source} 部分搜尋失敗：{len(e.failures)}/{e.attempted} 個搜尋詞（{reasons}）", file=sys.stderr)
                 except Exception as e:
                     errors += 1
                     source_outcomes.setdefault((route, source), []).append(False)
-                    detail = f" [{e.code}] {e.public_reason}" if isinstance(e, SurugayaUnavailable) else ""
-                    print(f"{source} 搜尋失敗：{type(e).__name__}{detail}", file=sys.stderr)
+                    print(f"{source} 搜尋失敗：{failure_detail(e)}", file=sys.stderr)
                     continue
+                searched += 1
+                source_outcomes.setdefault((route, source), []).append(partial is None)
                 token = wid + ":" + source
                 if route != DEFAULT_WEBHOOK_ENV:
                     token = route + ":" + token
@@ -744,13 +782,18 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 if source == "surugaya" and w.get("notify_restock", False):
                     present, complete = surugaya.inventory_snapshot(source_watch["keywords"] or [w["keyword"]])
                     route_inventory = inventory.setdefault(route, {})
+                    # 部分結果只能證明仍在售，不能證明缺貨。
                     route_inventory[wid], returned = observe_inventory(
-                        route_inventory.get(wid), source_watch, identities, present, complete, limit=SEEN_KEEP)
+                        route_inventory.get(wid), source_watch, identities, present,
+                        complete and partial is None, limit=SEEN_KEEP)
                 count = sum(identity not in known for identity in identities)
                 print(f"{source} 本次 {len(items)} 筆符合，新品 {count} 筆"
                       + (f"，重新販售 {len(returned)} 筆" if returned else "")
-                      + ("（首次建立基準；僅指定補查項目可通知）" if first_run else ""))
-                if token not in baselines:
+                      + ("（首次建立基準；僅指定補查項目可通知）" if first_run else "")
+                      + (("（部分搜尋詞失敗，結果不完整" + ("；基準待全部搜尋詞成功後完成" if first_run else "") + "）")
+                         if partial is not None else ""))
+                # 新規則須所有搜尋詞都成功才完成基準；否則失敗搜尋詞原有的商品下輪會被誤報為新品。
+                if token not in baselines and (partial is None or not first_run):
                     baselines.append(token)
                 if first_run:
                     baseline_ids = [identity for identity in identities if identity not in route_candidates and identity not in pending_catchup]

@@ -109,12 +109,23 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(options["sort_order"], app.SearchRequestData.SortOrder.ORDER_DESC)
         self.assertEqual(options["status"], [app.SearchRequestData.Status.STATUS_ON_SALE])
 
-    def test_partial_keyword_failure_does_not_return_partial_result(self):
+    def test_partial_keyword_failure_continues_and_keeps_successful_results(self):
         client = Obj(search=AsyncMock(side_effect=[
-            Obj(items=[item()]), RuntimeError("unavailable")]))
+            Obj(items=[item()]), RuntimeError("unavailable"), Obj(items=[item(), item("two")])]))
         with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(app.PartialSearchError) as partial:
+                asyncio.run(app.search_new(client, watch(keywords=["first", "second", "third"])))
+        self.assertEqual(client.search.await_count, 3)  # A failed keyword does not stop the others.
+        self.assertEqual([x.id_ for x in partial.exception.items], ["one", "two"])
+        self.assertEqual([type(e) for e in partial.exception.failures], [RuntimeError])
+        self.assertEqual(partial.exception.attempted, 3)
+        failures = [RuntimeError("first"), RuntimeError("second")]
+        client = Obj(search=AsyncMock(side_effect=failures))
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError) as failed:
                 asyncio.run(app.search_new(client, watch(keywords=["first", "second"])))
+        self.assertIs(failed.exception, failures[0])  # Nothing succeeded: an ordinary source failure.
+        self.assertEqual(client.search.await_count, 2)
 
     def test_filter_title_and_current_auction_price(self):
         auction = Obj(bid_deadline=datetime.now(timezone.utc), highest_bid=1001)
@@ -197,6 +208,43 @@ class MonitorTests(unittest.TestCase):
         self.assertFalse(returned)
         self.assertEqual(changed["offers"]["example"]["missing"], 0)
         self.assertEqual(first["offers"]["example"]["missing"], 2)
+
+    def test_partial_surugaya_search_cannot_confirm_absence_or_invent_restock(self):
+        identity = "surugaya:EXAMPLE100:0000:used"
+        listing = item(identity, source="surugaya", url="https://www.suruga-ya.jp/product/detail/EXAMPLE100")
+        self.write_watches([watch(keywords=["first", "second"], sources=["surugaya"], price_max=None, notify_restock=True)])
+        self.seen_path.write_text(json.dumps({
+            "sample": [identity], "_known": [identity], "_baselines": ["sample:surugaya"],
+        }))
+        def missing():
+            state = json.loads(self.seen_path.read_text())
+            return state["_surugaya_inventory"][app.DEFAULT_WEBHOOK_ENV]["sample"]["offers"][identity]["missing"]
+        def partial(*found):
+            return app.PartialSearchError(list(found), [app.SurugayaUnavailable("browser-request")], 2)
+        with patch.object(app, "Mercapi"), \
+                patch.object(app, "search_new", AsyncMock(return_value=[listing])) as search, \
+                patch.object(app.SurugayaSearch, "inventory_snapshot", return_value=(set(), True)), \
+                patch.object(app, "notify", return_value=True) as send, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_check(), 0)  # Seeds the offer as available.
+            # Even if the source claims full coverage, a failed keyword cannot confirm absence.
+            search.side_effect = [partial(), partial()]
+            self.assertEqual(self.run_check(), 1)
+            self.assertEqual(self.run_check(), 1)
+            self.assertEqual(missing(), 0)
+            search.side_effect = None
+            self.assertEqual(self.run_check(), 0)  # Still listed: not a return to sale.
+            send.assert_not_called()
+            search.return_value = []
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(missing(), 2)
+            # Two complete absences, then a successful keyword sees it again: a genuine return.
+            search.side_effect = [partial(listing)]
+            self.assertEqual(self.run_check(), 1)
+        send.assert_called_once()
+        self.assertEqual([r["notification_reason"] for r in send.call_args.args[0]], ["restock"])
+        self.assertEqual(missing(), 0)
 
     def test_selected_source_preserves_other_source_history_and_health(self):
         self.write_watches([watch(sources=["jp", "surugaya"])])
@@ -559,6 +607,75 @@ class MonitorTests(unittest.TestCase):
         state = json.loads(self.seen_path.read_text())
         self.assertIn("m123", state["_known"])
         self.assertIn("old", state["sample"])
+
+    def test_keyword_failure_delivers_successful_keywords_and_retries_next_run(self):
+        self.write_watches([watch(keywords=["first", "second"])])
+        self.seen_path.write_text(json.dumps({"sample": ["old"], "_known": ["old"], "_baselines": ["sample:jp"]}))
+        error = io.StringIO()
+        with patch.object(app, "Mercapi") as api, patch.object(app, "notify", side_effect=[False, True, True]) as send, \
+                contextlib.redirect_stderr(error):
+            api.return_value.search = AsyncMock(side_effect=[
+                RuntimeError("private-query"), Obj(items=[item("old"), item("m100")]),
+                RuntimeError("private-query"), Obj(items=[item("old"), item("m100")]),
+                Obj(items=[item("m200")]), Obj(items=[item("old"), item("m100")]),
+            ])
+            self.assertEqual(self.run_check(), 2)  # Partial search and failed delivery both fail the run.
+            state = json.loads(self.seen_path.read_text())
+            self.assertNotIn("m100", state["_known"])  # Failed delivery stays eligible for retry.
+            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 1, "alerted": False})
+            self.assertEqual(self.run_check(), 1)  # Delivered, but a partial search is not reported as success.
+            state = json.loads(self.seen_path.read_text())
+            self.assertIn("m100", state["_known"])
+            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 2, "alerted": False})
+            self.assertEqual(self.run_check(), 0)  # The failed keyword is searched again; only its new item is sent.
+        self.assertEqual(api.return_value.search.await_count, 6)
+        self.assertEqual([[r["item_id"] for r in call.args[0]] for call in send.call_args_list],
+                         [["m100"], ["m100"], ["m200"]])
+        state = json.loads(self.seen_path.read_text())
+        self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 0, "alerted": False})
+        self.assertIn("jp 部分搜尋失敗：1/2 個搜尋詞（RuntimeError）", error.getvalue())
+        self.assertNotIn("private-query", error.getvalue())
+
+    def test_partial_keyword_failure_keeps_route_health_warning(self):
+        secondary = "DISCORD_WEBHOOK_URL_SECONDARY"
+        self.write_watches([watch(keywords=["first", "second"], discord_webhook_env=secondary)])
+        self.seen_path.write_text(json.dumps({"_baselines": [secondary + ":sample:jp"], "_health": {
+            "fails": 0, "alerted": False, "sources": {secondary + ":jp": {"fails": 2, "alerted": False}}}}))
+        partial = app.PartialSearchError([item("m100")], [RuntimeError("private")], 2)
+        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=[partial, [item("m100")]])), \
+                patch.object(app, "notify", return_value=True) as send, patch.object(app, "alert") as warn, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_check(), 1)
+            send.assert_called_once()  # The successful keyword's new item is not held back.
+            warn.assert_called_once()
+            self.assertEqual(warn.call_args.kwargs["webhook_env"], secondary)
+            health = json.loads(self.seen_path.read_text())["_health"]["sources"][secondary + ":jp"]
+            self.assertEqual(health, {"fails": 3, "alerted": True})
+            self.assertEqual(self.run_check(), 0)  # Only a complete search clears the warning.
+        send.assert_called_once()
+        self.assertEqual(warn.call_count, 2)
+        self.assertIn("恢復", warn.call_args.args[0])
+        health = json.loads(self.seen_path.read_text())["_health"]["sources"][secondary + ":jp"]
+        self.assertEqual(health, {"fails": 0, "alerted": False})
+
+    def test_partial_first_run_does_not_complete_new_rule_baseline(self):
+        self.write_watches([watch(keywords=["first", "second"])])
+        with patch.object(app, "Mercapi") as api, patch.object(app, "notify", return_value=True) as send, \
+                contextlib.redirect_stderr(io.StringIO()):
+            api.return_value.search = AsyncMock(side_effect=[
+                Obj(items=[item("m100")]), RuntimeError("unavailable"),
+                Obj(items=[item("m100")]), Obj(items=[item("m200")]),
+                Obj(items=[item("m100")]), Obj(items=[item("m200"), item("m300")]),
+            ])
+            self.assertEqual(self.run_check(), 1)
+            self.assertNotIn("sample:jp", json.loads(self.seen_path.read_text())["_baselines"])
+            # m200 already existed; it went unseen only because its keyword failed.
+            self.assertEqual(self.run_check(), 0)
+            send.assert_not_called()
+            self.assertIn("sample:jp", json.loads(self.seen_path.read_text())["_baselines"])
+            self.assertEqual(self.run_check(), 0)
+        send.assert_called_once()
+        self.assertEqual([r["item_id"] for r in send.call_args.args[0]], ["m300"])
 
     def test_new_source_baseline_does_not_consume_pending_notification(self):
         self.write_watches([watch(price_max=None, sources=["jp", "tw"])])
