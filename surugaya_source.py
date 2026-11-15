@@ -1,4 +1,5 @@
 """Suruga-ya's Japanese storefront, using its native search controls."""
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -248,6 +249,7 @@ class SurugayaSearch:
         self.complete_searches = {}
         self.image_cache = {}
         self.unavailable = False
+        self.verification_required = False
         self.timeout_error = TimeoutError
 
     def inventory_snapshot(self, keywords):
@@ -325,18 +327,24 @@ class SurugayaSearch:
         except (ValueError, ModuleNotFoundError):
             raise SurugayaUnavailable("browser-config") from None
 
-    async def search(self, keyword: str) -> list[SurugayaItem]:
-        if self.unavailable:
-            raise SurugayaUnavailable("browser-unavailable")
-        if keyword in self.cache:
-            return list(self.cache[keyword])
+    async def _reset_browser(self):
+        """Drop the current browser so the next attempt starts from a clean session."""
+        context, playwright = self.context, self.playwright
+        self.context = self.page = self.playwright = None
+        for closer in (context and context.close, playwright and playwright.stop):
+            if closer:
+                try:
+                    await closer()
+                except Exception:
+                    pass
+
+    async def _search_once(self, keyword: str) -> list[SurugayaItem]:
         try:
             await self.open_browser()
             await self.page.goto(surugaya_search_url(keyword), wait_until="domcontentloaded", timeout=30000)
             try:
                 await self.page.locator('#search_header .hit').wait_for(timeout=10000)
             except self.timeout_error:
-                self.unavailable = True
                 if any(urlparse(frame.url).hostname == "challenges.cloudflare.com" for frame in self.page.frames):
                     raise SurugayaUnavailable("verification") from None
                 raise SurugayaUnavailable("browser-timeout") from None
@@ -348,6 +356,26 @@ class SurugayaSearch:
         except SourceUnavailable:
             raise
         except Exception as error:
-            # Do not repeat a browser/challenge failure for every private keyword.
-            self.unavailable = True
             raise SurugayaUnavailable("browser-request") from error
+
+    async def search(self, keyword: str) -> list[SurugayaItem]:
+        if self.unavailable:
+            raise SurugayaUnavailable("browser-unavailable")
+        if keyword in self.cache:
+            return list(self.cache[keyword])
+        for attempt in range(2):
+            try:
+                return await self._search_once(keyword)
+            except SurugayaUnavailable as error:
+                # A slow page or crashed browser gets one clean-session retry; a
+                # human-verification challenge is never retried against.
+                if error.code in ("browser-timeout", "browser-request") and attempt == 0:
+                    await self._reset_browser()
+                    await asyncio.sleep(2)
+                    continue
+                # Do not repeat a browser/challenge failure for every private keyword.
+                if error.code in ("browser-timeout", "browser-request", "verification"):
+                    self.unavailable = True
+                if error.code == "verification":
+                    self.verification_required = True
+                raise

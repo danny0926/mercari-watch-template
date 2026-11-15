@@ -17,6 +17,7 @@ import asyncio
 import json
 import math
 import os
+import random
 import re
 import sys
 import time
@@ -30,7 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from mercapi import Mercapi
 from mercapi.requests.search import SearchRequestData
-from market_sources import TaiwanSearch
+from market_sources import SourceUnavailable, TaiwanSearch
 from yahoo_sources import YahooSearch
 from surugaya_source import SurugayaSearch, SurugayaUnavailable
 from surugaya_inventory import observe_inventory
@@ -43,7 +44,14 @@ SEEN = BASE / "seen.json"
 SEEN_KEEP = 500          # 每組條件最多記住幾個 ID
 DELAY_BETWEEN = 2        # 每組條件之間間隔秒數，避免打太快
 HEALTH_KEY = "_health"   # seen.json 裡記錄連續失敗次數的欄位
-ALERT_AFTER = 3          # 連續失敗幾次發警告
+ALERT_AFTER = 6          # 連續失敗幾次發警告（單輪約 5 分鐘，約 30 分鐘持續失敗才警告）
+RECOVER_AFTER = 2        # 警告後須連續成功幾次才宣告恢復，避免反覆警告/恢復
+SEARCH_RETRIES = 2       # 暫時性網路錯誤的重試次數（不含首次）
+RETRY_BACKOFF = 3        # 重試前等待秒數基數，逐次加倍並加隨機抖動
+RETRY_SOURCES = ("jp", "yahoo_fleamarket")  # 台灣與駿河屋各有自己的重試/重置流程
+HTTP_TIMEOUT = httpx.Timeout(30.0, connect=15.0)  # mercapi 預設只有 5 秒，易誤判逾時
+SURUGAYA_COOLDOWN_KEY = "_surugaya_cooldown_until"
+SURUGAYA_COOLDOWN = timedelta(minutes=30)  # 需要真人驗證時暫停駿河屋，避免連續撞驗證
 MAX_CARDS = 12           # LINE carousel 上限
 DISCORD_MAX_RETRIES = 2
 DISCORD_MAX_RETRY_AFTER = 10  # 超過此秒數留待下輪，避免排程長時間等待
@@ -179,8 +187,7 @@ async def search_new(m: Mercapi, w: dict, taiwan=None, external=None, detail_cac
     for index, keyword in enumerate(keywords):
         if index:
             await asyncio.sleep(DELAY_BETWEEN)
-        matched = {}
-        try:
+        async def fetch(keyword=keyword):
             if source in ("yahoo_fleamarket", "surugaya"):
                 if external is None:
                     async with (SurugayaSearch() if source == "surugaya" else YahooSearch(source)) as client:
@@ -206,6 +213,20 @@ async def search_new(m: Mercapi, w: dict, taiwan=None, external=None, detail_cac
                     status=[SearchRequestData.Status.STATUS_ON_SALE],
                 )
                 items = res.items
+            return items
+        matched = {}
+        try:
+            items = None
+            for attempt in range(SEARCH_RETRIES + 1):
+                try:
+                    items = await fetch()
+                    break
+                except Exception as error:
+                    transient = (isinstance(error, (httpx.TransportError, SourceUnavailable))
+                                 and not isinstance(error, SurugayaUnavailable))
+                    if not (transient and source in RETRY_SOURCES and attempt < SEARCH_RETRIES):
+                        raise
+                    await asyncio.sleep(RETRY_BACKOFF * 2 ** attempt + random.random())
             print(f"搜尋回傳 {len(items)} 筆")
             for it in items:
                 if passes_filters(it, w) and await extended_match(it, w, m, detail_cache):
@@ -596,6 +617,14 @@ def alert(text: str, webhook_env: str = DEFAULT_WEBHOOK_ENV) -> None:
 
 # ---------- 主流程 ----------
 
+def parse_cooldown(value):
+    try:
+        until = datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+    return until if until is None or until.tzinfo else None
+
+
 def load_json(path: Path, default):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
 
@@ -709,7 +738,7 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
             raise ValueError("MONITOR_STATE_KEY is required")
         Fernet(key.encode("ascii"))
     seen = load_state()
-    m = Mercapi()
+    m = Mercapi(httpx_client=httpx.AsyncClient(timeout=HTTP_TIMEOUT))
     candidates, errors, searched = {}, 0, 0
     new_seen = dict(seen)
     stored_routes = seen.get("_known_by_route", {})
@@ -729,6 +758,10 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
     baseline_records = {}
     source_outcomes = {}
     detail_cache = {}
+    skipped = 0
+    cooldown_noted = False
+    cooldown_until = parse_cooldown(seen.get(SURUGAYA_COOLDOWN_KEY))
+    cooldown_active = cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until
     catchup_done = {route: set(values) for route, values in seen.get("_catchup_done_by_route", {}).items()}
     receipts = {route: dict(values) for route, values in seen.get("_notification_receipts", {}).items()}
     stored_inventory = seen.get("_surugaya_inventory", {})
@@ -756,6 +789,12 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                     source_outcomes.setdefault((route, source), []).append(False)
                     print("tw 搜尋失敗：台灣來源請使用不限價條件", file=sys.stderr)
                     continue
+                if source == "surugaya" and cooldown_active:
+                    skipped += 1
+                    if not cooldown_noted:
+                        print("surugaya 需要真人驗證，冷卻中暫停搜尋。")
+                        cooldown_noted = True
+                    continue
                 partial = None
                 try:
                     items = await search_new(m, source_watch, taiwan, external, detail_cache=detail_cache)
@@ -766,12 +805,16 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                     reasons = "、".join(dict.fromkeys(failure_detail(error) for error in e.failures))
                     print(f"{source} 部分搜尋失敗：{len(e.failures)}/{e.attempted} 個搜尋詞（{reasons}）", file=sys.stderr)
                 except Exception as e:
-                    errors += 1
                     source_outcomes.setdefault((route, source), []).append(False)
+                    if isinstance(e, SurugayaUnavailable) and e.code == "browser-unavailable":
+                        # 同輪先前已有真正失敗，這是連鎖略過：計入來源健康，但不重複計錯誤或印出。
+                        continue
+                    errors += 1
                     print(f"{source} 搜尋失敗：{failure_detail(e)}", file=sys.stderr)
                     continue
                 searched += 1
-                source_outcomes.setdefault((route, source), []).append(partial is None)
+                # 部分搜尋詞失敗仍有結果，不算來源失敗（已記錄於 stderr 並計入結束代碼）。
+                source_outcomes.setdefault((route, source), []).append(True)
                 token = wid + ":" + source
                 if route != DEFAULT_WEBHOOK_ENV:
                     token = route + ":" + token
@@ -827,6 +870,19 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 new_seen[wid] = list(dict.fromkeys(fresh_ids + previous_ids))[:SEEN_KEEP]
                 await asyncio.sleep(DELAY_BETWEEN)
 
+    if surugaya.verification_required:
+        cooldown_until = datetime.now(timezone.utc) + SURUGAYA_COOLDOWN
+        if not dry_run:
+            new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
+            for route in dict.fromkeys(webhook_env_for(w) for w in active if "surugaya" in w.get("sources", [])):
+                alert(f"🛑 {SOURCE_LABELS['surugaya']} 需要人工驗證（Cloudflare）。"
+                      f"程式不會自動點擊驗證，將暫停搜尋約 {int(SURUGAYA_COOLDOWN.total_seconds() // 60)} 分鐘後再試。",
+                      webhook_env=route)
+    elif cooldown_active:
+        new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
+    else:
+        new_seen.pop(SURUGAYA_COOLDOWN_KEY, None)
+
     if dry_run:
         print(f"試跑完成：{sum(len(items) for items in candidates.values())} 筆新品候選，不通知、不保存。")
         return errors
@@ -866,7 +922,7 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
 
     # 健康狀態：全部搜尋都失敗才算一次失敗
     health = dict(seen.get(HEALTH_KEY, {"fails": 0, "alerted": False}))
-    if active and searched == 0:
+    if active and searched == 0 and not skipped:
         health["fails"] += 1
     else:
         health = {"fails": 0, "alerted": False}
@@ -877,8 +933,14 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
         previous = providers.get(key, {"fails": 0, "alerted": False})
         if all(outcomes):
             if previous.get("alerted"):
-                alert(f"✅ {SOURCE_LABELS[source]} 來源已恢復正常。", webhook_env=route)
-            health["sources"][key] = {"fails": 0, "alerted": False}
+                streak = previous.get("ok_streak", 0) + 1
+                if streak >= RECOVER_AFTER:
+                    alert(f"✅ {SOURCE_LABELS[source]} 來源已恢復正常。", webhook_env=route)
+                    health["sources"][key] = {"fails": 0, "alerted": False}
+                else:
+                    health["sources"][key] = {"fails": previous.get("fails", 0), "alerted": True, "ok_streak": streak}
+            else:
+                health["sources"][key] = {"fails": 0, "alerted": False}
         else:
             current = {"fails": previous.get("fails", 0) + 1, "alerted": previous.get("alerted", False)}
             if current["fails"] >= ALERT_AFTER and not current["alerted"]:

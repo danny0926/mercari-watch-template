@@ -36,11 +36,36 @@ class SurugayaTests(unittest.TestCase):
             with self.assertRaises(SurugayaUnavailable) as first:
                 await source.search("example")
             self.assertEqual(first.exception.code, "verification")
+            self.assertTrue(source.verification_required)
             with self.assertRaises(SurugayaUnavailable) as second:
                 await source.search("other")
             self.assertEqual(second.exception.code, "browser-unavailable")
         asyncio.run(check())
         source.page.goto.assert_awaited_once()
+
+    def test_timeout_gets_one_clean_browser_retry_before_giving_up(self):
+        source = SurugayaSearch()
+        opened = []
+        async def open_browser():
+            source.context = SimpleNamespace(close=AsyncMock())
+            opened.append(source.context)
+            source.page = SimpleNamespace(
+                goto=AsyncMock(), frames=[],
+                locator=lambda _: SimpleNamespace(wait_for=AsyncMock(side_effect=TimeoutError())))
+        source.open_browser = open_browser
+        async def check():
+            with patch("surugaya_source.asyncio.sleep", AsyncMock()):
+                with self.assertRaises(SurugayaUnavailable) as failed:
+                    await source.search("example")
+                self.assertEqual(failed.exception.code, "browser-timeout")
+                self.assertTrue(source.unavailable)
+                self.assertFalse(source.verification_required)
+                with self.assertRaises(SurugayaUnavailable) as skipped:
+                    await source.search("other")
+                self.assertEqual(skipped.exception.code, "browser-unavailable")
+        asyncio.run(check())
+        self.assertEqual(len(opened), 2)  # A fresh browser session was used for the retry.
+        opened[0].close.assert_awaited_once()
 
     def test_only_complete_successful_query_coverage_can_confirm_absence(self):
         full = data([card()])

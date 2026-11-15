@@ -42,6 +42,9 @@ class MonitorTests(unittest.TestCase):
         network = patch.object(app.httpx, "post", side_effect=AssertionError("Unexpected HTTP request"))
         network.start()
         self.addCleanup(network.stop)
+        backoff = patch.object(app, "RETRY_BACKOFF", 0)
+        backoff.start()
+        self.addCleanup(backoff.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.watch_path = Path(self.tmp.name) / "watchlist.json"
@@ -622,11 +625,11 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(self.run_check(), 2)  # Partial search and failed delivery both fail the run.
             state = json.loads(self.seen_path.read_text())
             self.assertNotIn("m100", state["_known"])  # Failed delivery stays eligible for retry.
-            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 1, "alerted": False})
+            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 0, "alerted": False})  # Partial results are not a source outage.
             self.assertEqual(self.run_check(), 1)  # Delivered, but a partial search is not reported as success.
             state = json.loads(self.seen_path.read_text())
             self.assertIn("m100", state["_known"])
-            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 2, "alerted": False})
+            self.assertEqual(state["_health"]["sources"]["jp"], {"fails": 0, "alerted": False})
             self.assertEqual(self.run_check(), 0)  # The failed keyword is searched again; only its new item is sent.
         self.assertEqual(api.return_value.search.await_count, 6)
         self.assertEqual([[r["item_id"] for r in call.args[0]] for call in send.call_args_list],
@@ -636,27 +639,75 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("jp 部分搜尋失敗：1/2 個搜尋詞（RuntimeError）", error.getvalue())
         self.assertNotIn("private-query", error.getvalue())
 
-    def test_partial_keyword_failure_keeps_route_health_warning(self):
+    def test_partial_keyword_failure_does_not_count_as_source_outage(self):
         secondary = "DISCORD_WEBHOOK_URL_SECONDARY"
         self.write_watches([watch(keywords=["first", "second"], discord_webhook_env=secondary)])
         self.seen_path.write_text(json.dumps({"_baselines": [secondary + ":sample:jp"], "_health": {
-            "fails": 0, "alerted": False, "sources": {secondary + ":jp": {"fails": 2, "alerted": False}}}}))
+            "fails": 0, "alerted": False, "sources": {secondary + ":jp": {"fails": app.ALERT_AFTER - 1, "alerted": False}}}}))
         partial = app.PartialSearchError([item("m100")], [RuntimeError("private")], 2)
-        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=[partial, [item("m100")]])), \
-                patch.object(app, "notify", return_value=True) as send, patch.object(app, "alert") as warn, \
-                contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(self.run_check(), 1)
+        with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=partial)),                 patch.object(app, "notify", return_value=True) as send, patch.object(app, "alert") as warn,                 contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_check(), 1)  # Still reflected in the exit code.
             send.assert_called_once()  # The successful keyword's new item is not held back.
-            warn.assert_called_once()
-            self.assertEqual(warn.call_args.kwargs["webhook_env"], secondary)
-            health = json.loads(self.seen_path.read_text())["_health"]["sources"][secondary + ":jp"]
-            self.assertEqual(health, {"fails": 3, "alerted": True})
-            self.assertEqual(self.run_check(), 0)  # Only a complete search clears the warning.
-        send.assert_called_once()
-        self.assertEqual(warn.call_count, 2)
-        self.assertIn("恢復", warn.call_args.args[0])
+        warn.assert_not_called()
         health = json.loads(self.seen_path.read_text())["_health"]["sources"][secondary + ":jp"]
         self.assertEqual(health, {"fails": 0, "alerted": False})
+
+    def test_full_outage_alerts_then_needs_consecutive_successes_to_recover(self):
+        secondary = "DISCORD_WEBHOOK_URL_SECONDARY"
+        self.write_watches([watch(discord_webhook_env=secondary)])
+        self.seen_path.write_text(json.dumps({"_baselines": [secondary + ":sample:jp"], "_health": {
+            "fails": 0, "alerted": False, "sources": {secondary + ":jp": {"fails": app.ALERT_AFTER - 1, "alerted": False}}}}))
+        def health():
+            return json.loads(self.seen_path.read_text())["_health"]["sources"][secondary + ":jp"]
+        with patch.object(app, "Mercapi"), patch.object(app, "notify", return_value=True), patch.object(app, "alert") as warn,                 contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(app, "search_new", AsyncMock(side_effect=RuntimeError("private"))):
+                self.assertEqual(self.run_check(), 1)
+            warn.assert_called_once()
+            self.assertEqual(warn.call_args.kwargs["webhook_env"], secondary)
+            self.assertEqual(health(), {"fails": app.ALERT_AFTER, "alerted": True})
+            with patch.object(app, "search_new", AsyncMock(return_value=[])):
+                self.run_check()
+                warn.assert_called_once()  # One good round is not yet a recovery.
+                self.assertEqual(health()["ok_streak"], 1)
+                with patch.object(app, "search_new", AsyncMock(side_effect=RuntimeError("private"))):
+                    self.run_check()
+                self.assertNotIn("ok_streak", health())  # A relapse resets the streak.
+                self.run_check()
+                self.run_check()
+        self.assertEqual(warn.call_count, 2)
+        self.assertIn("恢復", warn.call_args.args[0])
+        self.assertEqual(health(), {"fails": 0, "alerted": False})
+
+    def test_transient_network_errors_are_retried_before_failing(self):
+        import httpx
+        self.write_watches([watch()])
+        self.seen_path.write_text(json.dumps({"_baselines": ["sample:jp"]}))
+        with patch.object(app, "Mercapi") as api, patch.object(app, "RETRY_BACKOFF", 0),                 patch.object(app, "notify", return_value=True), contextlib.redirect_stderr(io.StringIO()):
+            api.return_value.search = AsyncMock(side_effect=[httpx.ReadTimeout("x"), httpx.ConnectTimeout("x"), Obj(items=[item("m1")])])
+            self.assertEqual(self.run_check(), 0)
+            self.assertEqual(api.return_value.search.await_count, 3)
+            api.return_value.search = AsyncMock(side_effect=RuntimeError("not transient"))
+            self.assertEqual(self.run_check(), 1)
+            self.assertEqual(api.return_value.search.await_count, 1)  # Unknown errors are not retried.
+
+    def test_verification_starts_surugaya_cooldown_and_cascade_is_not_double_counted(self):
+        self.write_watches([watch(id="a", sources=["surugaya"]), watch(id="b", sources=["surugaya"])])
+        self.seen_path.write_text(json.dumps({"_baselines": ["a:surugaya", "b:surugaya"]}))
+        from surugaya_source import SurugayaUnavailable
+        failures = [SurugayaUnavailable("verification"), SurugayaUnavailable("browser-unavailable")]
+        error = io.StringIO()
+        with patch.object(app, "Mercapi"), patch.object(app, "SurugayaSearch") as browser,                 patch.object(app, "search_new", AsyncMock(side_effect=failures)), patch.object(app, "alert") as warn,                 contextlib.redirect_stderr(error):
+            browser.return_value.__aenter__.return_value.verification_required = True
+            self.assertEqual(self.run_check(), 1)  # The cascaded skip is not a second error.
+            self.assertEqual(error.getvalue().count("搜尋失敗"), 1)
+            warn.assert_called_once()
+            self.assertIn("人工驗證", warn.call_args.args[0])
+            self.assertIn(app.SURUGAYA_COOLDOWN_KEY, json.loads(self.seen_path.read_text()))
+            search = AsyncMock(return_value=[])
+            with patch.object(app, "search_new", search):
+                browser.return_value.__aenter__.return_value.verification_required = False
+                self.assertEqual(self.run_check(), 0)
+            search.assert_not_awaited()  # Cooling down: Suruga-ya is not searched again.
 
     def test_partial_first_run_does_not_complete_new_rule_baseline(self):
         self.write_watches([watch(keywords=["first", "second"])])
@@ -748,7 +799,7 @@ class MonitorTests(unittest.TestCase):
         secondary = "DISCORD_WEBHOOK_URL_SECONDARY"
         self.write_watches([watch(id="first"), watch(id="second", discord_webhook_env=secondary)])
         self.seen_path.write_text(json.dumps({"_health": {"fails": 0, "alerted": False,
-            "sources": {secondary + ":jp": {"fails": 2, "alerted": False}}}}))
+            "sources": {secondary + ":jp": {"fails": app.ALERT_AFTER - 1, "alerted": False}}}}))
         with patch.object(app, "Mercapi"), patch.object(app, "search_new", AsyncMock(side_effect=[[], RuntimeError("private")])), patch.object(app, "alert") as send, contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.run_check(), 1)
         send.assert_called_once()
