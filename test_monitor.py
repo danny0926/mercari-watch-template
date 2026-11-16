@@ -701,7 +701,7 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(self.run_check(), 1)  # The cascaded skip is not a second error.
             self.assertEqual(error.getvalue().count("搜尋失敗"), 1)
             warn.assert_called_once()
-            self.assertIn("人工驗證", warn.call_args.args[0])
+            self.assertIn("自動通過失敗", warn.call_args.args[0])
             self.assertIn(app.SURUGAYA_COOLDOWN_KEY, json.loads(self.seen_path.read_text()))
             search = AsyncMock(return_value=[])
             with patch.object(app, "search_new", search):

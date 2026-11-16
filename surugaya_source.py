@@ -250,6 +250,7 @@ class SurugayaSearch:
         self.image_cache = {}
         self.unavailable = False
         self.verification_required = False
+        self.solve_challenges = os.environ.get("SURUGAYA_SOLVE_CHALLENGE", "1").strip() not in ("0", "false", "")
         self.timeout_error = TimeoutError
 
     def inventory_snapshot(self, keywords):
@@ -338,16 +339,72 @@ class SurugayaSearch:
                 except Exception:
                     pass
 
+    def _cloudflare_frame(self):
+        for frame in self.page.frames:
+            if urlparse(frame.url).hostname == "challenges.cloudflare.com":
+                return frame
+        return None
+
+    async def _results_ready(self, timeout: int) -> bool:
+        try:
+            await self.page.locator('#search_header .hit').wait_for(timeout=timeout)
+            return True
+        except self.timeout_error:
+            return False
+
+    async def _capture_challenge(self):
+        """Save a screenshot and the challenge markup so selectors can be refined."""
+        try:
+            base = Path(os.environ.get("MONITOR_STATE_PATH",
+                        Path(__file__).parent / ".state/seen.enc")).parent / "surugaya-challenge"
+            base.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(JST).strftime("%Y%m%d-%H%M%S")
+            try:
+                await self.page.screenshot(path=str(base / f"{stamp}.png"))
+            except Exception:
+                pass
+            frame = self._cloudflare_frame()
+            html = await (frame.content() if frame else self.page.content())
+            (base / f"{stamp}.html").write_text(html, encoding="utf-8")
+        except Exception:
+            pass  # Diagnostics must never break the solve attempt.
+
+    async def _solve_challenge(self) -> bool:
+        """Best-effort humanized click on the Cloudflare Turnstile checkbox.
+
+        Returns True only when the real search results become ready. This clears an
+        interactive checkbox challenge; a non-interactive trust challenge has nothing
+        to click and will simply return False for the cooldown fallback to handle.
+        """
+        await self._capture_challenge()
+        selector = 'iframe[src*="challenges.cloudflare.com"]'
+        for _ in range(2):
+            try:
+                box = self.page.frame_locator(selector).locator('input[type="checkbox"], label, body').first
+                await box.click(timeout=4000)
+            except Exception:
+                try:  # Fall back to a humanized click at the widget's on-page location.
+                    rect = await self.page.locator(selector).first.bounding_box()
+                    if rect:
+                        await self.page.mouse.click(rect["x"] + 30, rect["y"] + rect["height"] / 2)
+                except Exception:
+                    pass
+            if await self._results_ready(12000):
+                return True
+            if self._cloudflare_frame() is None:
+                return await self._results_ready(5000)
+        return False
+
     async def _search_once(self, keyword: str) -> list[SurugayaItem]:
         try:
             await self.open_browser()
             await self.page.goto(surugaya_search_url(keyword), wait_until="domcontentloaded", timeout=30000)
-            try:
-                await self.page.locator('#search_header .hit').wait_for(timeout=10000)
-            except self.timeout_error:
-                if any(urlparse(frame.url).hostname == "challenges.cloudflare.com" for frame in self.page.frames):
-                    raise SurugayaUnavailable("verification") from None
-                raise SurugayaUnavailable("browser-timeout") from None
+            if not await self._results_ready(10000):
+                if self._cloudflare_frame() is not None:
+                    if not (self.solve_challenges and await self._solve_challenge()):
+                        raise SurugayaUnavailable("verification") from None
+                else:
+                    raise SurugayaUnavailable("browser-timeout") from None
             data = await self.page.evaluate(EXTRACT_SEARCH)
             results = parse_surugaya_results(data, keyword)
             self.cache[keyword] = results

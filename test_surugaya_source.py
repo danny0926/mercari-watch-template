@@ -24,10 +24,10 @@ def data(rows):
 
 
 class SurugayaTests(unittest.TestCase):
-    def test_verification_stops_this_run_without_clicking_or_repeating_queries(self):
+    def test_unsolvable_challenge_stops_this_run_without_repeating_queries(self):
         source = SurugayaSearch()
+        source.solve_challenges = False  # The checkbox cannot be cleared this round.
         source.context = object()
-        # Frames deliberately have no click/locator methods: verification is observed only.
         source.page = SimpleNamespace(
             goto=AsyncMock(), frames=[SimpleNamespace(url="https://challenges.cloudflare.com/example")],
             locator=lambda _: SimpleNamespace(wait_for=AsyncMock(side_effect=TimeoutError())),
@@ -42,6 +42,34 @@ class SurugayaTests(unittest.TestCase):
             self.assertEqual(second.exception.code, "browser-unavailable")
         asyncio.run(check())
         source.page.goto.assert_awaited_once()
+
+    def test_clicking_the_checkbox_clears_the_challenge_and_returns_results(self):
+        source = SurugayaSearch()
+        source.context = object()
+        state = {"solved": False}
+
+        async def click(timeout):
+            state["solved"] = True  # The humanized checkbox click passes the challenge.
+            source.page.frames = []
+
+        def locator(sel):
+            async def wait_for(timeout):
+                if not state["solved"]:
+                    raise TimeoutError()
+            return SimpleNamespace(wait_for=wait_for)
+
+        source.page = SimpleNamespace(
+            goto=AsyncMock(), content=AsyncMock(return_value="<html></html>"), screenshot=AsyncMock(),
+            frames=[SimpleNamespace(url="https://challenges.cloudflare.com/x")],
+            frame_locator=lambda _: SimpleNamespace(
+                locator=lambda _s: SimpleNamespace(first=SimpleNamespace(click=click))),
+            locator=locator, evaluate=AsyncMock(return_value=data([card()])),
+        )
+        results = asyncio.run(source.search("example"))
+        self.assertEqual(len(results), 1)
+        self.assertFalse(source.verification_required)
+        self.assertFalse(source.unavailable)
+        source.page.evaluate.assert_awaited_once()
 
     def test_timeout_gets_one_clean_browser_retry_before_giving_up(self):
         source = SurugayaSearch()

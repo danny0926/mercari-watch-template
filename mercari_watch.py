@@ -875,8 +875,10 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
         if not dry_run:
             new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
             for route in dict.fromkeys(webhook_env_for(w) for w in active if "surugaya" in w.get("sources", [])):
-                alert(f"🛑 {SOURCE_LABELS['surugaya']} 需要人工驗證（Cloudflare）。"
-                      f"程式不會自動點擊驗證，將暫停搜尋約 {int(SURUGAYA_COOLDOWN.total_seconds() // 60)} 分鐘後再試。",
+                alert(f"🛑 {SOURCE_LABELS['surugaya']} 的 Cloudflare 驗證自動通過失敗。"
+                      f"（多為瀏覽器信譽下降的非互動式挑戰，非單純核取方塊）"
+                      f"將暫停搜尋約 {int(SURUGAYA_COOLDOWN.total_seconds() // 60)} 分鐘後再試；"
+                      f"挑戰截圖與 HTML 已存於 .state/surugaya-challenge。",
                       webhook_env=route)
     elif cooldown_active:
         new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
