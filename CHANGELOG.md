@@ -5,7 +5,8 @@
 - Give Mercari Japan a 30-second HTTP timeout (the library default of 5 seconds caused most `ReadTimeout` failures) and retry transient Mercari Japan / Yahoo!フリマ network errors twice with backoff.
 - Count a source as failed only when every keyword fails; raise the alert threshold to 6 consecutive failures and require 2 consecutive clean rounds before announcing recovery.
 - Retry Suruga-ya once with a fresh browser after a timeout or browser error; on human verification, never retry, send one dedicated notice and pause Suruga-ya for 30 minutes. Cascaded `browser-unavailable` skips no longer inflate the error count.
-- On a Suruga-ya Cloudflare challenge, attempt one humanized in-session checkbox click (toggle with `SURUGAYA_SOLVE_CHALLENGE=0`) before the cooldown fallback, and save a screenshot plus challenge HTML under `.state/surugaya-challenge/` for diagnosis. A non-interactive trust challenge still falls back to the cooldown notice.
+- On a Suruga-ya Cloudflare challenge, attempt one humanized in-session checkbox click (toggle with `SURUGAYA_SOLVE_CHALLENGE=0`) before the cooldown fallback, and save a screenshot plus challenge HTML next to the active state for diagnosis.
+- Alert the Suruga-ya verification block only once on entry and once on recovery (no longer every cooldown expiry), and back off the cooldown geometrically from 30 minutes up to 4 hours while the block persists.
 - Preserve and notify successful keyword results when other keywords fail, while reporting partial source failures and requiring complete results for new baselines and stock-absence observations.
 
 ## 0.9.0

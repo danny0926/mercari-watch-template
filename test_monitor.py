@@ -701,13 +701,48 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(self.run_check(), 1)  # The cascaded skip is not a second error.
             self.assertEqual(error.getvalue().count("搜尋失敗"), 1)
             warn.assert_called_once()
-            self.assertIn("自動通過失敗", warn.call_args.args[0])
+            self.assertIn("Cloudflare", warn.call_args.args[0])
             self.assertIn(app.SURUGAYA_COOLDOWN_KEY, json.loads(self.seen_path.read_text()))
             search = AsyncMock(return_value=[])
             with patch.object(app, "search_new", search):
                 browser.return_value.__aenter__.return_value.verification_required = False
                 self.assertEqual(self.run_check(), 0)
             search.assert_not_awaited()  # Cooling down: Suruga-ya is not searched again.
+
+    def test_repeated_verification_alerts_once_then_recovers_with_one_notice(self):
+        self.write_watches([watch(id="a", sources=["surugaya"])])
+        self.seen_path.write_text(json.dumps({"_baselines": ["a:surugaya"]}))
+        from surugaya_source import SurugayaUnavailable
+
+        def blocked():  # A fresh browser each run that keeps hitting the challenge.
+            b = AsyncMock(); b.__aenter__.return_value.verification_required = True; return b
+        with patch.object(app, "Mercapi"), patch.object(app, "alert") as warn, contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(app, "SurugayaSearch", side_effect=lambda: blocked()), \
+                    patch.object(app, "search_new", AsyncMock(side_effect=SurugayaUnavailable("verification"))):
+                self.assertEqual(self.run_check(), 1)
+            first = json.loads(self.seen_path.read_text())[app.SURUGAYA_COOLDOWN_KEY]
+            warn.assert_called_once()  # Entering the blocked state alerts exactly once.
+            # Force the cooldown to have expired so the next run retries and is blocked again.
+            state = json.loads(self.seen_path.read_text())
+            state[app.SURUGAYA_COOLDOWN_KEY]["until"] = "2000-01-01T00:00:00+00:00"
+            self.seen_path.write_text(json.dumps(state))
+            with patch.object(app, "SurugayaSearch", side_effect=lambda: blocked()), \
+                    patch.object(app, "search_new", AsyncMock(side_effect=SurugayaUnavailable("verification"))):
+                self.assertEqual(self.run_check(), 1)
+            warn.assert_called_once()  # Still blocked: no repeat alert.
+            second = json.loads(self.seen_path.read_text())[app.SURUGAYA_COOLDOWN_KEY]
+            self.assertGreater(second["strikes"], first["strikes"])  # Backoff escalates.
+            # Now Suruga-ya recovers.
+            state = json.loads(self.seen_path.read_text())
+            state[app.SURUGAYA_COOLDOWN_KEY]["until"] = "2000-01-01T00:00:00+00:00"
+            self.seen_path.write_text(json.dumps(state))
+            ok = AsyncMock(); ok.__aenter__.return_value.verification_required = False
+            with patch.object(app, "SurugayaSearch", return_value=ok), \
+                    patch.object(app, "search_new", AsyncMock(return_value=[])):
+                self.assertEqual(self.run_check(), 0)
+        self.assertEqual(warn.call_count, 2)  # Exactly one recovery notice after one block notice.
+        self.assertIn("恢復", warn.call_args.args[0])
+        self.assertNotIn(app.SURUGAYA_COOLDOWN_KEY, json.loads(self.seen_path.read_text()))
 
     def test_partial_first_run_does_not_complete_new_rule_baseline(self):
         self.write_watches([watch(keywords=["first", "second"])])

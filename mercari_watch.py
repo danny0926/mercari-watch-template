@@ -51,7 +51,8 @@ RETRY_BACKOFF = 3        # 重試前等待秒數基數，逐次加倍並加隨�
 RETRY_SOURCES = ("jp", "yahoo_fleamarket")  # 台灣與駿河屋各有自己的重試/重置流程
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=15.0)  # mercapi 預設只有 5 秒，易誤判逾時
 SURUGAYA_COOLDOWN_KEY = "_surugaya_cooldown_until"
-SURUGAYA_COOLDOWN = timedelta(minutes=30)  # 需要真人驗證時暫停駿河屋，避免連續撞驗證
+SURUGAYA_COOLDOWN_BASE = timedelta(minutes=30)  # 撞驗證後暫停駿河屋，避免連續撞驗證
+SURUGAYA_COOLDOWN_MAX = timedelta(hours=4)       # 連續撞驗證時的冷卻上限（遞增退避）
 MAX_CARDS = 12           # LINE carousel 上限
 DISCORD_MAX_RETRIES = 2
 DISCORD_MAX_RETRY_AFTER = 10  # 超過此秒數留待下輪，避免排程長時間等待
@@ -625,6 +626,17 @@ def parse_cooldown(value):
     return until if until is None or until.tzinfo else None
 
 
+def load_surugaya_cooldown(seen):
+    """讀取駿河屋冷卻狀態，相容舊版單純時間字串。"""
+    raw = seen.get(SURUGAYA_COOLDOWN_KEY)
+    if isinstance(raw, str):  # 舊格式：只有到期時間
+        return {"until": parse_cooldown(raw), "alerted": True, "strikes": 1}
+    if isinstance(raw, dict):
+        return {"until": parse_cooldown(raw.get("until")),
+                "alerted": bool(raw.get("alerted")), "strikes": int(raw.get("strikes", 1))}
+    return {"until": None, "alerted": False, "strikes": 0}
+
+
 def load_json(path: Path, default):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
 
@@ -760,7 +772,8 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
     detail_cache = {}
     skipped = 0
     cooldown_noted = False
-    cooldown_until = parse_cooldown(seen.get(SURUGAYA_COOLDOWN_KEY))
+    cooldown = load_surugaya_cooldown(seen)
+    cooldown_until = cooldown["until"]
     cooldown_active = cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until
     catchup_done = {route: set(values) for route, values in seen.get("_catchup_done_by_route", {}).items()}
     receipts = {route: dict(values) for route, values in seen.get("_notification_receipts", {}).items()}
@@ -870,18 +883,32 @@ async def check_once(dry_run: bool = False, only_sources=None) -> int:
                 new_seen[wid] = list(dict.fromkeys(fresh_ids + previous_ids))[:SEEN_KEEP]
                 await asyncio.sleep(DELAY_BETWEEN)
 
+    surugaya_outcomes = [outcomes for (route, src), outcomes in source_outcomes.items() if src == "surugaya"]
+    surugaya_ok = bool(surugaya_outcomes) and all(all(outcomes) for outcomes in surugaya_outcomes)
+    surugaya_routes = list(dict.fromkeys(webhook_env_for(w) for w in active if "surugaya" in w.get("sources", [])))
     if surugaya.verification_required:
-        cooldown_until = datetime.now(timezone.utc) + SURUGAYA_COOLDOWN
+        # 遞增退避：連續撞驗證就拉長冷卻；通知只在進入時發一次，避免洗版。
+        strikes = cooldown["strikes"] + 1
+        wait = min(SURUGAYA_COOLDOWN_BASE * 2 ** (strikes - 1), SURUGAYA_COOLDOWN_MAX)
+        until = datetime.now(timezone.utc) + wait
         if not dry_run:
-            new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
-            for route in dict.fromkeys(webhook_env_for(w) for w in active if "surugaya" in w.get("sources", [])):
-                alert(f"🛑 {SOURCE_LABELS['surugaya']} 的 Cloudflare 驗證自動通過失敗。"
-                      f"（多為瀏覽器信譽下降的非互動式挑戰，非單純核取方塊）"
-                      f"將暫停搜尋約 {int(SURUGAYA_COOLDOWN.total_seconds() // 60)} 分鐘後再試；"
-                      f"挑戰截圖與 HTML 已存於 .state/surugaya-challenge。",
-                      webhook_env=route)
+            new_seen[SURUGAYA_COOLDOWN_KEY] = {"until": until.isoformat(), "alerted": True, "strikes": strikes}
+            if not cooldown["alerted"]:
+                for route in surugaya_routes:
+                    alert(f"🛑 {SOURCE_LABELS['surugaya']} 被 Cloudflare 擋下（「驗證您是人類」核取方塊），"
+                          f"自動點擊無法通過，多為無頭瀏覽器信譽不足。暫停約 {int(wait.total_seconds() // 60)} "
+                          f"分鐘後再試，恢復時會再通知；若持續，請在本機用有畫面的瀏覽器手動過一次驗證。",
+                          webhook_env=route)
+    elif surugaya_ok:
+        if not dry_run:
+            new_seen.pop(SURUGAYA_COOLDOWN_KEY, None)
+            if cooldown["alerted"]:
+                for route in surugaya_routes:
+                    alert(f"✅ {SOURCE_LABELS['surugaya']} 已通過驗證，恢復搜尋。", webhook_env=route)
     elif cooldown_active:
-        new_seen[SURUGAYA_COOLDOWN_KEY] = cooldown_until.isoformat()
+        if not dry_run:
+            new_seen[SURUGAYA_COOLDOWN_KEY] = {"until": cooldown_until.isoformat(),
+                                               "alerted": cooldown["alerted"], "strikes": cooldown["strikes"]}
     else:
         new_seen.pop(SURUGAYA_COOLDOWN_KEY, None)
 
