@@ -251,6 +251,8 @@ class SurugayaSearch:
         self.unavailable = False
         self.verification_required = False
         self.solve_challenges = os.environ.get("SURUGAYA_SOLVE_CHALLENGE", "1").strip() not in ("0", "false", "")
+        self.auto_reseed = os.environ.get("SURUGAYA_AUTO_RESEED", "1").strip() not in ("0", "false", "")
+        self.reseeded = False
         self.timeout_error = TimeoutError
 
     def inventory_snapshot(self, keywords):
@@ -415,6 +417,44 @@ class SurugayaSearch:
         except Exception as error:
             raise SurugayaUnavailable("browser-request") from error
 
+    async def _reseed_clearance(self) -> bool:
+        """以有畫面的 CloakBrowser 開同一 profile，讓 Cloudflare 自動放行、把 cf_clearance 寫回 profile。
+
+        必須在無頭 context 已關閉（profile 未被占用）時呼叫。回傳是否成功取得通行證。
+        """
+        if browser_backend() != "cloakbrowser":
+            return False  # 有頭的 patchright/Edge 方案不走此自動重取路徑。
+        ctx = None
+        try:
+            configure_browser_driver()
+            configuration = configure_cloak_runtime()
+            profile = configuration["profile"]
+            from cloakbrowser import launch_persistent_context_async
+            args = [f"--disk-cache-dir={profile / 'disk-cache'}",
+                    f"--crash-dumps-dir={configuration['temporary'] / 'crash-dumps'}",
+                    "--disable-breakpad", "--disable-crash-reporter"]
+            if os.environ.get("SURUGAYA_RESEED_WINDOW", "").strip() == "offscreen":
+                args += ["--window-position=-32000,-32000", "--window-size=1200,900"]
+            ctx = await launch_persistent_context_async(
+                str(profile), headless=False, humanize=True,
+                browser_version=configuration["version"], env=browser_child_environment(), args=args)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await page.goto(surugaya_search_url("フィギュア"), wait_until="domcontentloaded", timeout=60000)
+            for _ in range(45):  # 最多約 90 秒等待自動放行
+                cleared = not any(urlparse(f.url).hostname == "challenges.cloudflare.com" for f in page.frames)
+                if cleared and await page.locator('#search_header').count():
+                    return True
+                await page.wait_for_timeout(2000)
+            return False
+        except Exception:
+            return False
+        finally:
+            if ctx is not None:
+                try:
+                    await ctx.close()  # 關閉即把 cf_clearance 寫入 profile
+                except Exception:
+                    pass
+
     async def search(self, keyword: str) -> list[SurugayaItem]:
         if self.unavailable:
             raise SurugayaUnavailable("browser-unavailable")
@@ -430,6 +470,13 @@ class SurugayaSearch:
                     await self._reset_browser()
                     await asyncio.sleep(2)
                     continue
+                # 撞到驗證時，先關無頭、用有畫面瀏覽器自動重新取得通行證，再重試一次。
+                if error.code == "verification" and self.auto_reseed and not self.reseeded and attempt == 0:
+                    self.reseeded = True
+                    await self._reset_browser()
+                    if await self._reseed_clearance():
+                        await asyncio.sleep(1)
+                        continue
                 # Do not repeat a browser/challenge failure for every private keyword.
                 if error.code in ("browser-timeout", "browser-request", "verification"):
                     self.unavailable = True

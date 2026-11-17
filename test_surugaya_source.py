@@ -27,6 +27,7 @@ class SurugayaTests(unittest.TestCase):
     def test_unsolvable_challenge_stops_this_run_without_repeating_queries(self):
         source = SurugayaSearch()
         source.solve_challenges = False  # The checkbox cannot be cleared this round.
+        source.auto_reseed = False       # This test covers the plain verification path only.
         source.context = object()
         source.page = SimpleNamespace(
             goto=AsyncMock(), frames=[SimpleNamespace(url="https://challenges.cloudflare.com/example")],
@@ -42,6 +43,39 @@ class SurugayaTests(unittest.TestCase):
             self.assertEqual(second.exception.code, "browser-unavailable")
         asyncio.run(check())
         source.page.goto.assert_awaited_once()
+
+    def test_verification_triggers_headed_reseed_then_retries_headless(self):
+        source = SurugayaSearch()
+        source.solve_challenges = False
+        calls = {"search": 0}
+
+        async def search_once(keyword):
+            calls["search"] += 1
+            if calls["search"] == 1:
+                raise SurugayaUnavailable("verification")
+            return parse_surugaya_results(data([card()]), keyword)
+
+        source._search_once = search_once
+        source._reset_browser = AsyncMock()
+        source._reseed_clearance = AsyncMock(return_value=True)
+        results = asyncio.run(source.search("example"))
+        self.assertEqual(len(results), 1)
+        source._reseed_clearance.assert_awaited_once()
+        source._reset_browser.assert_awaited_once()  # Headless closed before the headed reseed.
+        self.assertFalse(source.verification_required)
+        self.assertFalse(source.unavailable)
+
+    def test_failed_reseed_still_reports_verification(self):
+        source = SurugayaSearch()
+        source.solve_challenges = False
+        source._search_once = AsyncMock(side_effect=SurugayaUnavailable("verification"))
+        source._reset_browser = AsyncMock()
+        source._reseed_clearance = AsyncMock(return_value=False)
+        with self.assertRaises(SurugayaUnavailable) as caught:
+            asyncio.run(source.search("example"))
+        self.assertEqual(caught.exception.code, "verification")
+        self.assertTrue(source.verification_required)
+        source._reseed_clearance.assert_awaited_once()  # Only one reseed attempt per cycle.
 
     def test_clicking_the_checkbox_clears_the_challenge_and_returns_results(self):
         source = SurugayaSearch()

@@ -139,7 +139,9 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 網站要求人工驗證時，程式先嘗試一次擬人核取方塊點擊（可用 `SURUGAYA_SOLVE_CHALLENGE=0` 關閉），失敗才回報 `verification`，不反覆點擊。此時暫停當輪後續駿河屋查詢並進入遞增退避冷卻（30 分鐘起、最長 4 小時），通知只在進入與恢復時各發一次。沒有驗證 frame 但結果逾時則回報 `browser-timeout`，兩者都不當成零商品。
 
-遇到信譽型的非互動式挑戰（無頭點擊無法通過）時，在本機自己的終端執行 `python verify_surugaya.py`：以相同 CloakBrowser profile 開一個有畫面視窗，手動（或由網站自動）通過一次驗證，`cf_clearance` 會寫入 profile 供無頭沿用；通行證有時效，之後再撞驗證時重跑即可。該腳本與無頭監聽共用 `configure_browser_driver()` 的 Node 解析，套件 Playwright 的 Node 若在 Windows 損壞會自動改用 Patchright 的 Node，不需手動修檔。執行前請確認駿河屋正在冷卻，避免與監聽同時開啟同一 profile。
+無頭撞到驗證時，程式會自動開一次有畫面 CloakBrowser（同一 profile）讓 Cloudflare 自動放行、把 `cf_clearance` 寫回 profile，再重試無頭；成功即靜默恢復，每輪最多重取一次（`SURUGAYA_AUTO_RESEED=0` 關閉）。會短暫跳出瀏覽器視窗，可設 `SURUGAYA_RESEED_WINDOW=offscreen` 嘗試移到畫面外。自動重取失敗才進冷卻並發通知。
+
+也可在本機自己的終端手動執行 `python verify_surugaya.py`：以相同 CloakBrowser profile 開一個有畫面視窗，手動（或由網站自動）通過一次驗證，`cf_clearance` 會寫入 profile 供無頭沿用；通行證有時效，之後再撞驗證時重跑即可。該腳本與無頭監聽共用 `configure_browser_driver()` 的 Node 解析，套件 Playwright 的 Node 若在 Windows 損壞會自動改用 Patchright 的 Node，不需手動修檔。執行前請確認駿河屋正在冷卻，避免與監聽同時開啟同一 profile。
 
 Check workflow 的 `surugaya_probe` 在獨立 Windows job 驗證通用 DOM 範例、原生搜尋與公開商品圖片，不讀私人條件或通知憑證。首頁能開啟不代表排序、庫存、價格與圖片皆可用；網站仍可能變更驗證要求。
 
