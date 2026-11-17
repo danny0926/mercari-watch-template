@@ -19,7 +19,7 @@ PROJECT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT))
 
 from dotenv import load_dotenv
-from browser_runtime import configure_cloak_runtime, browser_child_environment
+from browser_runtime import configure_browser_driver, configure_cloak_runtime, browser_child_environment
 from surugaya_source import surugaya_search_url
 
 WAIT_SECONDS = 420  # 最多等 7 分鐘讓你手動點過驗證
@@ -27,6 +27,8 @@ WAIT_SECONDS = 420  # 最多等 7 分鐘讓你手動點過驗證
 
 async def main() -> int:
     load_dotenv(PROJECT / ".env", override=False, interpolate=False)
+    # 與無頭監聽相同：若套件 Playwright 的 Node 損壞，改用專案 Patchright 的 Node。
+    configure_browser_driver()
     conf = configure_cloak_runtime()
     profile = conf["profile"]
     from cloakbrowser import launch_persistent_context_async

@@ -137,7 +137,9 @@ Check workflow 的 `state_audit` 可唯讀檢查指定刊登是否已進入加�
 
 目前固定 Python wrapper `0.6.4` 與免登入 Chromium `146.0.7680.177.5`，停用自動更新；不取得額外授權、不使用付費代理。wrapper 為 MIT，瀏覽器本體適用不同的 [Binary License](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md)，不隨本 repo 散布或上傳公開 Cache／Artifacts。目前專案整合不啟用帶 license key 的版本，因其額外儲存路徑與條件需要另行處理。需要維護性切換時，可明確設定 `SURUGAYA_BROWSER_BACKEND=patchright` 使用原本有頭方案；程式不會在無頭失敗時自動開視窗。
 
-網站要求人工驗證時，程式回報 `verification` 並停止當輪後續駿河屋查詢，不點擊或操作驗證控制；需由維護者另行處理。沒有驗證 frame 但結果逾時則回報 `browser-timeout`，兩者都不當成零商品。
+網站要求人工驗證時，程式先嘗試一次擬人核取方塊點擊（可用 `SURUGAYA_SOLVE_CHALLENGE=0` 關閉），失敗才回報 `verification`，不反覆點擊。此時暫停當輪後續駿河屋查詢並進入遞增退避冷卻（30 分鐘起、最長 4 小時），通知只在進入與恢復時各發一次。沒有驗證 frame 但結果逾時則回報 `browser-timeout`，兩者都不當成零商品。
+
+遇到信譽型的非互動式挑戰（無頭點擊無法通過）時，在本機自己的終端執行 `python verify_surugaya.py`：以相同 CloakBrowser profile 開一個有畫面視窗，手動（或由網站自動）通過一次驗證，`cf_clearance` 會寫入 profile 供無頭沿用；通行證有時效，之後再撞驗證時重跑即可。該腳本與無頭監聽共用 `configure_browser_driver()` 的 Node 解析，套件 Playwright 的 Node 若在 Windows 損壞會自動改用 Patchright 的 Node，不需手動修檔。執行前請確認駿河屋正在冷卻，避免與監聽同時開啟同一 profile。
 
 Check workflow 的 `surugaya_probe` 在獨立 Windows job 驗證通用 DOM 範例、原生搜尋與公開商品圖片，不讀私人條件或通知憑證。首頁能開啟不代表排序、庫存、價格與圖片皆可用；網站仍可能變更驗證要求。
 
