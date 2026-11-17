@@ -46,14 +46,21 @@ async def main() -> int:
     print(f"已開啟駿河屋搜尋頁，請在視窗點過『驗證您是人類』：\n{url}", flush=True)
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
+    def challenge_present() -> bool:
+        from urllib.parse import urlparse
+        return any(urlparse(f.url).hostname == "challenges.cloudflare.com" for f in page.frames)
+
     ok = False
-    for _ in range(WAIT_SECONDS // 3):
-        try:
-            await page.locator('#search_header .hit').wait_for(timeout=3000)
-            ok = True
-            break
-        except BrowserTimeout:
-            continue
+    for _ in range(WAIT_SECONDS // 2):
+        # 成功 = Cloudflare 挑戰消失、且駿河屋搜尋頁已出現（命中數或搜尋框）。
+        if not challenge_present():
+            try:
+                if await page.locator('#search_header .hit, #search_header').count():
+                    ok = True
+                    break
+            except BrowserTimeout:
+                pass
+        await page.wait_for_timeout(2000)
     if ok:
         await page.wait_for_timeout(1500)  # 讓 cookie 寫入設定檔
         print("✅ 驗證通過，搜尋結果已載入；cf_clearance 已存入設定檔，無頭監聽可沿用。", flush=True)
